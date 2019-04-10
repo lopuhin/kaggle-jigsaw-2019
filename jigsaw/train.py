@@ -6,11 +6,12 @@ import pandas as pd
 from sklearn.model_selection import KFold
 import torch
 import torch.cuda
-from torch import nn
+from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 import tqdm
 
 from .dataset import encode_comment, load_sp_model, SP_MODEL, DATA_ROOT
+from . import models
 
 
 class JigsawDataset(Dataset):
@@ -27,14 +28,16 @@ class JigsawDataset(Dataset):
         item = self.df.iloc[idx]
         comment = encode_comment(self.sp_model, item.comment_text,
                                  max_len=self.max_len)
-        target = item.target >= 0.5
-        return torch.LongTensor(comment), int(target)
+        comment = torch.tensor(comment, dtype=torch.int64)
+        target = torch.tensor([float(item.target >= 0.5)])
+        return comment, target
 
 
 def main():
     parser = argparse.ArgumentParser()
     arg = parser.add_argument
     arg('run_path')
+    arg('--model', default='SimpleLSTM')
     arg('--sp-model', default=SP_MODEL)
     arg('--max-len', type=int, default=250)
     arg('--batch-size', type=int, default=512)
@@ -69,10 +72,21 @@ def main():
         num_workers=args.workers,
     )
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model_cls = getattr(models, args.model)
+    model = model_cls(n_vocab=len(sp_model))
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    criterion = nn.BCEWithLogitsLoss()
 
-    for epoch in tqdm.trange(args.epochs, desc='epoch'):
-        for xs, ys in tqdm.tqdm(train_loader):
+    for _ in tqdm.trange(args.epochs, desc='epoch'):
+        pbar = tqdm.tqdm(train_loader)
+        for xs, ys in pbar:
+            optimizer.zero_grad()
             xs, ys = xs.to(device), ys.to(device)
+            ys_pred = model(xs)
+            loss = criterion(ys_pred, ys)
+            loss.backward()
+            pbar.set_postfix(loss=f'{loss.item():.2f}')
 
 
 if __name__ == '__main__':
