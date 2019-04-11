@@ -56,8 +56,8 @@ def main():
     run_path = Path(args.run_path)
     params_path = run_path / 'params.json'
     save_path = run_path / 'net.pt'
-    validate = args.validate
-    if validate:
+    run_validation = args.validate
+    if run_validation:
         params = json.loads(params_path.read_text())
         # args are ignored
     else:
@@ -162,7 +162,7 @@ def main():
             save()
             exit(1)
 
-    if validate:
+    if run_validation:
         model.load_state_dict(
             torch.load(save_path, map_location=device)['state_dict'])
         valid_metrics = get_validation_metrics()
