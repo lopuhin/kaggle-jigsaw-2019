@@ -1,7 +1,10 @@
 import argparse
 import json
 from pathlib import Path
+import statistics
+import shutil
 
+import json_log_plots
 import pandas as pd
 from sklearn.model_selection import KFold
 import torch
@@ -44,10 +47,16 @@ def main():
     arg('--lr', type=float, default=1e-4)
     arg('--epochs', type=int, default=10)
     arg('--workers', type=int, default=4)
+    arg('--validate-every', type=int, default=500)
+    arg('--clean', action='store_true')
     args = parser.parse_args()
 
-    params_string = json.dumps(vars(args), indent=4, sort_keys=True)
+    params = vars(args)
+    params_string = json.dumps(params, indent=4, sort_keys=True)
+    print(params_string)
     run_path = Path(args.run_path)
+    if args.clean and run_path.exists():
+        shutil.rmtree(run_path)
     run_path.mkdir(exist_ok=True, parents=True)
     (run_path / 'params.json').write_text(params_string)
 
@@ -73,20 +82,58 @@ def main():
     )
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model_cls = getattr(models, args.model)
-    model = model_cls(n_vocab=len(sp_model))
+    model: nn.Module = model_cls(n_vocab=len(sp_model))
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.BCEWithLogitsLoss()
+    step = 0
 
-    for _ in tqdm.trange(args.epochs, desc='epoch'):
-        pbar = tqdm.tqdm(train_loader)
-        for xs, ys in pbar:
-            optimizer.zero_grad()
+    def save():
+        print('saving...')
+        torch.save({
+            'state_dict': model.state_dict(),
+            'params': params,
+        }, run_path / 'net.pt')
+
+    def train_step(xs, ys):
+        optimizer.zero_grad()
+        xs, ys = xs.to(device), ys.to(device)
+        ys_pred = model(xs)
+        loss = criterion(ys_pred, ys)
+        loss.backward()
+        optimizer.step()
+        return loss.item()
+
+    def validate():
+        model.eval()
+        losses = []
+        for xs, ys in tqdm.tqdm(valid_loader, desc='validate',
+                                dynamic_ncols=True, leave=False):
             xs, ys = xs.to(device), ys.to(device)
             ys_pred = model(xs)
             loss = criterion(ys_pred, ys)
-            loss.backward()
-            pbar.set_postfix(loss=f'{loss.item():.2f}')
+            losses.append(loss.item())
+        valid_loss_value = statistics.mean(losses)
+        json_log_plots.write_event(run_path, step * args.batch_size,
+                                   valid_loss=valid_loss_value)
+        model.train()
+
+    try:
+        for _ in tqdm.trange(args.epochs, desc='epoch', dynamic_ncols=True):
+            pbar = tqdm.tqdm(train_loader, desc='train', dynamic_ncols=True)
+            for batch in pbar:
+                loss_value = train_step(*batch)
+                step += 1
+                pbar.set_postfix(loss=f'{loss_value:.2f}')
+                json_log_plots.write_event(run_path, step * args.batch_size,
+                                           loss=loss_value)
+                if args.validate_every and step % args.validate_every == 0:
+                    validate()
+            save()
+            validate()
+    except KeyboardInterrupt:
+        save()
+        exit(1)
 
 
 if __name__ == '__main__':

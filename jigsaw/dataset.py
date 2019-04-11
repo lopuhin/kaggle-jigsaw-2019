@@ -11,7 +11,8 @@ DATA_ROOT = Path('../input/jigsaw-2019' if ON_KAGGLE else './data')
 
 EOL = '</n>'
 VOCAB_SIZE = 16000
-SP_MODEL = f'sp-{VOCAB_SIZE}.model'
+model_name = lambda vocab_size: f'sp-{vocab_size}.model'
+SP_MODEL = model_name(VOCAB_SIZE)
 
 
 def prepare_sp_text():
@@ -37,7 +38,7 @@ def train_sp(vocab_size=VOCAB_SIZE):
     """
     sentencepiece.SentencePieceTrainer.Train(
         f'--input=train.txt '
-        f'--model_prefix={SP_MODEL.split(".")[0]} '
+        f'--model_prefix={model_name(vocab_size).split(".")[0]} '
         f'--vocab_size={vocab_size} '
         f'--character_coverage=0.99995 '
         f'--control_symbols={EOL} '
