@@ -24,6 +24,7 @@ class JigsawDataset(Dataset):
         self.df = df
         self.sp_model = sp_model
         self.max_len = max_len
+        self.has_target = 'target' in df.columns
 
     def __len__(self):
         return len(self.df)
@@ -33,13 +34,17 @@ class JigsawDataset(Dataset):
         comment = encode_comment(self.sp_model, item.comment_text,
                                  max_len=self.max_len)
         comment = torch.tensor(comment, dtype=torch.int64)
-        target = torch.tensor([float(item.target >= 0.5)])
-        return comment, target
+        if self.has_target:
+            target = torch.tensor([float(item.target >= 0.5)])
+            return comment, target
+        else:
+            return comment
 
 
 def main():
     parser = argparse.ArgumentParser()
     arg = parser.add_argument
+    arg('action', choices=['train', 'validate', 'submit'])
     arg('run_path')
     arg('--model', default='SimpleLSTM')
     arg('--sp-model', default=SP_MODEL)
@@ -56,11 +61,8 @@ def main():
     run_path = Path(args.run_path)
     params_path = run_path / 'params.json'
     save_path = run_path / 'net.pt'
-    run_validation = args.validate
-    if run_validation:
-        params = json.loads(params_path.read_text())
-        # args are ignored
-    else:
+    action = args.action
+    if action == 'train':
         params = vars(args)
         params_string = json.dumps(params, indent=4, sort_keys=True)
         print(params_string)
@@ -68,30 +70,34 @@ def main():
             shutil.rmtree(run_path)
         run_path.mkdir(exist_ok=True, parents=True)
         params_path.write_text(params_string)
+    else:
+        # args are ignored
+        params = json.loads(params_path.read_text())
     del args
 
     sp_model = load_sp_model(params['sp_model'])
-    df = pd.read_pickle(DATA_ROOT / 'train.pkl')
-    kfold = KFold(n_splits=10, shuffle=True, random_state=42)
-    train_ids, valid_ids = next(kfold.split(df))
-    train_df, valid_df = df.iloc[train_ids], df.iloc[valid_ids]
+    if action != 'submit':
+        df = pd.read_pickle(DATA_ROOT / 'train.pkl')
+        kfold = KFold(n_splits=10, shuffle=True, random_state=42)
+        train_ids, valid_ids = next(kfold.split(df))
+        train_df, valid_df = df.iloc[train_ids], df.iloc[valid_ids]
 
-    train_dataset = JigsawDataset(train_df, sp_model, params['max_len'])
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=params['batch_size'],
-        shuffle=True,
-        num_workers=params['workers'],
-    )
-    valid_dataset = JigsawDataset(valid_df, sp_model, params['max_len'])
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=params['batch_size'],
-        shuffle=False,
-        num_workers=params['workers'],
-    )
-    print(f'train size: {len(train_dataset):,} '
-          f'valid size: {len(valid_dataset):,}')
+        train_dataset = JigsawDataset(train_df, sp_model, params['max_len'])
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=params['batch_size'],
+            shuffle=True,
+            num_workers=params['workers'],
+        )
+        valid_dataset = JigsawDataset(valid_df, sp_model, params['max_len'])
+        valid_loader = DataLoader(
+            valid_dataset,
+            batch_size=params['batch_size'],
+            shuffle=False,
+            num_workers=params['workers'],
+        )
+        print(f'train size: {len(train_dataset):,} '
+              f'valid size: {len(valid_dataset):,}')
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model_cls = getattr(models, params['model'])
@@ -102,7 +108,6 @@ def main():
     step = 0
 
     def save():
-        print('saving...')
         torch.save({
             'state_dict': model.state_dict(),
             'params': params,
@@ -141,35 +146,60 @@ def main():
         json_log_plots.write_event(
             run_path, step * params['batch_size'], **get_validation_metrics())
 
+    def submit():
+        test_df = pd.read_csv(DATA_ROOT / 'test.csv')
+        model.eval()
+        test_dataset = JigsawDataset(test_df, sp_model, params['max_len'])
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=params['batch_size'],
+            shuffle=False,
+            num_workers=params['workers'],
+        )
+        predictions = []
+        for xs in tqdm.tqdm(test_loader, dynamic_ncols=True, leave=False):
+            xs = xs.to(device)
+            ys = torch.sigmoid(model(xs)[:, 0])
+            predictions.extend(map(float, ys.data.cpu()))
+        test_df.pop('comment_text')
+        test_df['prediction'] = predictions
+        test_df.to_csv('submission.csv', index=None)
+
+
     def train():
         nonlocal step
+        for _ in tqdm.trange(params['epochs'], desc='epoch',
+                             dynamic_ncols=True):
+            pbar = tqdm.tqdm(train_loader, desc='train', dynamic_ncols=True)
+            for batch in pbar:
+                loss_value = train_step(*batch)
+                step += 1
+                pbar.set_postfix(loss=f'{loss_value:.2f}')
+                json_log_plots.write_event(
+                    run_path, step * params['batch_size'], loss=loss_value)
+                if (params['validate_every'] and
+                        step % params['validate_every'] == 0):
+                    validate()
+            save()
+            validate()
+
+
+    if action == 'train':
         try:
-            for _ in tqdm.trange(params['epochs'], desc='epoch',
-                                 dynamic_ncols=True):
-                pbar = tqdm.tqdm(train_loader, desc='train', dynamic_ncols=True)
-                for batch in pbar:
-                    loss_value = train_step(*batch)
-                    step += 1
-                    pbar.set_postfix(loss=f'{loss_value:.2f}')
-                    json_log_plots.write_event(
-                        run_path, step * params['batch_size'], loss=loss_value)
-                    if (params['validate_every'] and
-                            step % params['validate_every'] == 0):
-                        validate()
-                save()
-                validate()
+            train()
         except KeyboardInterrupt:
+            print('Interrupted, saving...')
             save()
             exit(1)
-
-    if run_validation:
+    else:
         model.load_state_dict(
             torch.load(save_path, map_location=device)['state_dict'])
-        valid_metrics = get_validation_metrics()
-        for k in MAIN_METRICS:
-            print(f'{k:<20} {valid_metrics[k]:.4f}')
-    else:
-        train()
+        if action == 'validate':
+            valid_metrics = get_validation_metrics()
+            for k in MAIN_METRICS:
+                print(f'{k:<20} {valid_metrics[k]:.4f}')
+        elif action == 'submit':
+            submit()
 
 
 if __name__ == '__main__':
