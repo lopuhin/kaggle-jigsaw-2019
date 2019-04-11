@@ -5,9 +5,9 @@ from torch.nn import functional as F
 
 class SimpleLSTM(nn.Module):
     def __init__(
-            self,
+            self, *,
             n_vocab: int,
-            n_embed: int = 128,
+            n_embed: int,
             n_lstm: int = 128,
             n_linear: int = 128,
             ):

@@ -55,7 +55,7 @@ def main():
     arg('--workers', type=int, default=4)
     arg('--validate-every', type=int, default=1000)
     arg('--clean', action='store_true')
-    arg('--validate', action='store_true')
+    arg('--n-embed', type=int, default=128)
     args = parser.parse_args()
 
     run_path = Path(args.run_path)
@@ -70,6 +70,8 @@ def main():
             shutil.rmtree(run_path)
         run_path.mkdir(exist_ok=True, parents=True)
         params_path.write_text(params_string)
+        for p in Path('jigsaw').glob('*.py'):
+            shutil.copy(p, run_path)
     else:
         # args are ignored
         params = json.loads(params_path.read_text())
@@ -101,7 +103,10 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model_cls = getattr(models, params['model'])
-    model: nn.Module = model_cls(n_vocab=len(sp_model))
+    model: nn.Module = model_cls(
+        n_vocab=len(sp_model),
+        n_embed=params['n_embed'],
+    )
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=params['lr'])
     criterion = nn.BCEWithLogitsLoss()
@@ -181,7 +186,6 @@ def main():
                     validate()
             save()
             validate()
-
 
     if action == 'train':
         try:
