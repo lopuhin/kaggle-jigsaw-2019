@@ -49,42 +49,50 @@ def main():
     arg('--workers', type=int, default=4)
     arg('--validate-every', type=int, default=500)
     arg('--clean', action='store_true')
+    arg('--validate', action='store_true')
     args = parser.parse_args()
 
-    params = vars(args)
-    params_string = json.dumps(params, indent=4, sort_keys=True)
-    print(params_string)
     run_path = Path(args.run_path)
-    if args.clean and run_path.exists():
-        shutil.rmtree(run_path)
-    run_path.mkdir(exist_ok=True, parents=True)
-    (run_path / 'params.json').write_text(params_string)
+    params_path = run_path / 'params.json'
+    save_path = run_path / 'net.pt'
+    if args.validate:
+        params = json.loads(params_path.read_text())
+        # args are ignored
+    else:
+        params = vars(args)
+        params_string = json.dumps(params, indent=4, sort_keys=True)
+        print(params_string)
+        if args.clean and run_path.exists():
+            shutil.rmtree(run_path)
+        run_path.mkdir(exist_ok=True, parents=True)
+        params_path.write_text(params_string)
+    del args
 
-    sp_model = load_sp_model(args.sp_model)
+    sp_model = load_sp_model(params['sp_model'])
     df = pd.read_pickle(DATA_ROOT / 'train.pkl')
     kfold = KFold(n_splits=10, shuffle=True, random_state=42)
     train_ids, valid_ids = next(kfold.split(df))
     train_df, valid_df = df.iloc[train_ids], df.iloc[valid_ids]
 
-    train_dataset = JigsawDataset(train_df, sp_model, args.max_len)
+    train_dataset = JigsawDataset(train_df, sp_model, params['max_len'])
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=params['batch_size'],
         shuffle=True,
-        num_workers=args.workers,
+        num_workers=params['workers'],
     )
-    valid_dataset = JigsawDataset(valid_df, sp_model, args.max_len)
+    valid_dataset = JigsawDataset(valid_df, sp_model, params['max_len'])
     valid_loader = DataLoader(
         valid_dataset,
-        batch_size=args.batch_size,
+        batch_size=params['batch_size'],
         shuffle=False,
-        num_workers=args.workers,
+        num_workers=params['workers'],
     )
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model_cls = getattr(models, args.model)
+    model_cls = getattr(models, params['model'])
     model: nn.Module = model_cls(n_vocab=len(sp_model))
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.Adam(model.parameters(), lr=params['lr'])
     criterion = nn.BCEWithLogitsLoss()
     step = 0
 
@@ -93,7 +101,7 @@ def main():
         torch.save({
             'state_dict': model.state_dict(),
             'params': params,
-        }, run_path / 'net.pt')
+        }, save_path)
 
     def train_step(xs, ys):
         optimizer.zero_grad()
@@ -104,7 +112,7 @@ def main():
         optimizer.step()
         return loss.item()
 
-    def validate():
+    def get_validation_metrics():
         model.eval()
         losses = []
         for xs, ys in tqdm.tqdm(valid_loader, desc='validate',
@@ -114,26 +122,43 @@ def main():
             loss = criterion(ys_pred, ys)
             losses.append(loss.item())
         valid_loss_value = statistics.mean(losses)
-        json_log_plots.write_event(run_path, step * args.batch_size,
-                                   valid_loss=valid_loss_value)
         model.train()
+        return {
+            'valid_loss': valid_loss_value,
+        }
 
-    try:
-        for _ in tqdm.trange(args.epochs, desc='epoch', dynamic_ncols=True):
-            pbar = tqdm.tqdm(train_loader, desc='train', dynamic_ncols=True)
-            for batch in pbar:
-                loss_value = train_step(*batch)
-                step += 1
-                pbar.set_postfix(loss=f'{loss_value:.2f}')
-                json_log_plots.write_event(run_path, step * args.batch_size,
-                                           loss=loss_value)
-                if args.validate_every and step % args.validate_every == 0:
-                    validate()
+    def validate():
+        json_log_plots.write_event(
+            run_path, step * params['batch_size'], **get_validation_metrics())
+
+    def train():
+        nonlocal step
+        try:
+            for _ in tqdm.trange(params['epochs'], desc='epoch',
+                                 dynamic_ncols=True):
+                pbar = tqdm.tqdm(train_loader, desc='train', dynamic_ncols=True)
+                for batch in pbar:
+                    loss_value = train_step(*batch)
+                    step += 1
+                    pbar.set_postfix(loss=f'{loss_value:.2f}')
+                    json_log_plots.write_event(
+                        run_path, step * params['batch_size'], loss=loss_value)
+                    if (params['validate_every'] and
+                            step % params['validate_every'] == 0):
+                        validate()
+                save()
+                validate()
+        except KeyboardInterrupt:
             save()
-            validate()
-    except KeyboardInterrupt:
-        save()
-        exit(1)
+            exit(1)
+
+    if params['validate']:
+        model.load_state_dict(
+            torch.load(save_path, map_location=device)['state_dict'])
+        for k, v in get_validation_metrics().items():
+            print(f'{k:<20} {v:.4f}')
+    else:
+        train()
 
 
 if __name__ == '__main__':
