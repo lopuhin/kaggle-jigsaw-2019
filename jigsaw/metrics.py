@@ -14,8 +14,7 @@ IDENTITY_COLUMNS = [
 POWER = -5
 OVERALL_MODEL_WEIGHT = 0.25
 MAIN_METRICS = [
-    'auc', 'bias_score', 'overall_auc', SUBGROUP_AUC, BPSN_AUC, BNSP_AUC,
-    'valid_loss']
+    'auc', 'bias_score', 'overall_auc', SUBGROUP_AUC, BPSN_AUC, BNSP_AUC]
 
 
 def compute_bias_metrics_for_model(df: pd.DataFrame, pred_col: str) -> Dict:

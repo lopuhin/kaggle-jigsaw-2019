@@ -165,7 +165,6 @@ def main():
         test_df['prediction'] = predictions
         test_df.to_csv('submission.csv', index=None)
 
-
     def train():
         nonlocal step
         for _ in tqdm.trange(params['epochs'], desc='epoch',
@@ -196,7 +195,7 @@ def main():
             torch.load(save_path, map_location=device)['state_dict'])
         if action == 'validate':
             valid_metrics = get_validation_metrics()
-            for k in MAIN_METRICS:
+            for k in MAIN_METRICS + ['valid_loss']:
                 print(f'{k:<20} {valid_metrics[k]:.4f}')
         elif action == 'submit':
             submit()
