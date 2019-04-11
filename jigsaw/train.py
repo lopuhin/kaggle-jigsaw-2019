@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 import tqdm
 
 from .dataset import encode_comment, load_sp_model, SP_MODEL, DATA_ROOT
+from .metrics import compute_bias_metrics_for_model, MAIN_METRICS
 from . import models
 
 
@@ -47,7 +48,7 @@ def main():
     arg('--lr', type=float, default=1e-4)
     arg('--epochs', type=int, default=10)
     arg('--workers', type=int, default=4)
-    arg('--validate-every', type=int, default=500)
+    arg('--validate-every', type=int, default=1000)
     arg('--clean', action='store_true')
     arg('--validate', action='store_true')
     args = parser.parse_args()
@@ -55,7 +56,8 @@ def main():
     run_path = Path(args.run_path)
     params_path = run_path / 'params.json'
     save_path = run_path / 'net.pt'
-    if args.validate:
+    validate = args.validate
+    if validate:
         params = json.loads(params_path.read_text())
         # args are ignored
     else:
@@ -88,6 +90,9 @@ def main():
         shuffle=False,
         num_workers=params['workers'],
     )
+    print(f'train size: {len(train_dataset):,} '
+          f'valid size: {len(valid_dataset):,}')
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model_cls = getattr(models, params['model'])
     model: nn.Module = model_cls(n_vocab=len(sp_model))
@@ -113,19 +118,24 @@ def main():
         return loss.item()
 
     def get_validation_metrics():
-        model.eval()
         losses = []
+        predictions = []
+        model.eval()
         for xs, ys in tqdm.tqdm(valid_loader, desc='validate',
                                 dynamic_ncols=True, leave=False):
             xs, ys = xs.to(device), ys.to(device)
             ys_pred = model(xs)
+            predictions.extend(
+                map(float, torch.sigmoid(ys_pred[:, 0]).data.cpu()))
             loss = criterion(ys_pred, ys)
             losses.append(loss.item())
-        valid_loss_value = statistics.mean(losses)
         model.train()
-        return {
-            'valid_loss': valid_loss_value,
-        }
+        valid_loss_value = statistics.mean(losses)
+        pred_df = valid_loader.dataset.df.copy()
+        pred_df['pred'] = predictions
+        metrics = compute_bias_metrics_for_model(pred_df, 'pred')
+        metrics['valid_loss'] = valid_loss_value
+        return metrics
 
     def validate():
         json_log_plots.write_event(
@@ -152,11 +162,12 @@ def main():
             save()
             exit(1)
 
-    if params['validate']:
+    if validate:
         model.load_state_dict(
             torch.load(save_path, map_location=device)['state_dict'])
-        for k, v in get_validation_metrics().items():
-            print(f'{k:<20} {v:.4f}')
+        valid_metrics = get_validation_metrics()
+        for k in MAIN_METRICS:
+            print(f'{k:<20} {valid_metrics[k]:.4f}')
     else:
         train()
 
