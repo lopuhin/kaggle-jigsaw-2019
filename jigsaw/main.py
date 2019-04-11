@@ -50,7 +50,7 @@ def main():
     arg('--sp-model', default=SP_MODEL)
     arg('--max-len', type=int, default=250)
     arg('--batch-size', type=int, default=512)
-    arg('--lr', type=float, default=1e-4)
+    arg('--lr', type=float, default=3e-4)
     arg('--epochs', type=int, default=10)
     arg('--workers', type=int, default=4)
     arg('--validate-every', type=int, default=1000)
@@ -107,6 +107,8 @@ def main():
         n_vocab=len(sp_model),
         n_embed=params['n_embed'],
     )
+    if action == 'train':
+        print(model)
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=params['lr'])
     criterion = nn.BCEWithLogitsLoss()
