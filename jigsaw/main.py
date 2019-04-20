@@ -43,16 +43,22 @@ class JigsawDataset(Dataset):
 
 
 def collate_fn(inputs):
-    if isinstance(inputs[0], torch.Tensor):
-        comments, targets = inputs, None
+    has_target = not isinstance(inputs[0], torch.Tensor)
+    if has_target:
+        inputs = [(i, x, y) for i, (x, y) in enumerate(inputs)]
     else:
-        inputs = sorted(inputs, key=lambda x: len(x[0]), reverse=True)
-        comments = [x for x, _ in inputs]
-        targets = torch.stack([x for _, x in inputs])
+        inputs = list(enumerate(inputs))
+    inputs = sorted(inputs, key=lambda x: len(x[1]), reverse=True)
+    indices = [x[0] for x in inputs]
+    comments = [x[1] for x in inputs]
+    if has_target:
+        targets = torch.stack([x[2] for x in inputs])
+    else:
+        targets = None
     lengths = torch.tensor(list(map(len, comments)))
     comments = pad_sequence(comments, batch_first=True)
-    collated = (comments, lengths)
-    if targets is not None:
+    collated = (comments, lengths, indices)
+    if has_target:
         collated += (targets,)
     return collated
 
@@ -141,9 +147,9 @@ def main():
             'params': params,
         }, save_path)
 
-    def train_step(xs, lengths, ys):
+    def train_step(xs, lengths, _,  ys):
         optimizer.zero_grad()
-        xs, lengths, ys = [v.to(device) for v in [xs, lengths, ys]]
+        xs, ys = xs.to(device), ys.to(device)
         ys_pred = model(xs, lengths)
         loss = criterion(ys_pred, ys)
         loss.backward()
@@ -154,12 +160,12 @@ def main():
         losses = []
         predictions = []
         model.eval()
-        for xs, lengths, ys in tqdm.tqdm(valid_loader, desc='validate',
-                                         dynamic_ncols=True, leave=False):
-            xs, lengths, ys = xs.to(device), lengths.to(device), ys.to(device)
-            ys_pred = model(xs)
+        for xs, lengths, indices, ys in tqdm.tqdm(
+                valid_loader, desc='validate', dynamic_ncols=True, leave=False):
+            xs, ys = xs.to(device), ys.to(device)
+            ys_pred = model(xs, lengths)
             predictions.extend(
-                map(float, torch.sigmoid(ys_pred[:, 0]).data.cpu()))
+                map(float, torch.sigmoid(ys_pred[indices, 0]).data.cpu()))
             loss = criterion(ys_pred, ys)
             losses.append(loss.item())
         model.train()
@@ -183,11 +189,13 @@ def main():
             batch_size=params['batch_size'],
             shuffle=False,
             num_workers=params['workers'],
+            collate_fn=collate_fn,
         )
         predictions = []
-        for xs in tqdm.tqdm(test_loader, dynamic_ncols=True, leave=False):
+        for xs, lengths, indices in tqdm.tqdm(
+                test_loader, dynamic_ncols=True, leave=False):
             xs = xs.to(device)
-            ys = torch.sigmoid(model(xs)[:, 0])
+            ys = torch.sigmoid(model(xs, lengths)[indices, 0])
             predictions.extend(map(float, ys.data.cpu()))
         test_df.pop('comment_text')
         test_df['prediction'] = predictions
