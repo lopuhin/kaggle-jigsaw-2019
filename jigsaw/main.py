@@ -11,6 +11,7 @@ import torch
 import torch.cuda
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
+from torch.nn.utils.rnn import pad_sequence
 import tqdm
 
 from .dataset import encode_comment, load_sp_model, SP_MODEL, DATA_ROOT
@@ -39,6 +40,21 @@ class JigsawDataset(Dataset):
             return comment, target
         else:
             return comment
+
+
+def collate_fn(inputs):
+    if isinstance(inputs[0], torch.Tensor):
+        comments, targets = inputs, None
+    else:
+        inputs = sorted(inputs, key=lambda x: len(x[0]), reverse=True)
+        comments = [x for x, _ in inputs]
+        targets = torch.stack([x for _, x in inputs])
+    lengths = torch.tensor(list(map(len, comments)))
+    comments = pad_sequence(comments, batch_first=True)
+    collated = (comments, lengths)
+    if targets is not None:
+        collated += (targets,)
+    return collated
 
 
 def main():
@@ -93,6 +109,7 @@ def main():
             batch_size=params['batch_size'],
             shuffle=True,
             num_workers=params['workers'],
+            collate_fn=collate_fn,
         )
         valid_dataset = JigsawDataset(valid_df, sp_model, params['max_len'])
         valid_loader = DataLoader(
@@ -100,6 +117,7 @@ def main():
             batch_size=params['batch_size'],
             shuffle=False,
             num_workers=params['workers'],
+            collate_fn=collate_fn,
         )
         print(f'train size: {len(train_dataset):,} '
               f'valid size: {len(valid_dataset):,}')
@@ -123,10 +141,10 @@ def main():
             'params': params,
         }, save_path)
 
-    def train_step(xs, ys):
+    def train_step(xs, lengths, ys):
         optimizer.zero_grad()
-        xs, ys = xs.to(device), ys.to(device)
-        ys_pred = model(xs)
+        xs, lengths, ys = [v.to(device) for v in [xs, lengths, ys]]
+        ys_pred = model(xs, lengths)
         loss = criterion(ys_pred, ys)
         loss.backward()
         optimizer.step()
@@ -136,9 +154,9 @@ def main():
         losses = []
         predictions = []
         model.eval()
-        for xs, ys in tqdm.tqdm(valid_loader, desc='validate',
-                                dynamic_ncols=True, leave=False):
-            xs, ys = xs.to(device), ys.to(device)
+        for xs, lengths, ys in tqdm.tqdm(valid_loader, desc='validate',
+                                         dynamic_ncols=True, leave=False):
+            xs, lengths, ys = xs.to(device), lengths.to(device), ys.to(device)
             ys_pred = model(xs)
             predictions.extend(
                 map(float, torch.sigmoid(ys_pred[:, 0]).data.cpu()))

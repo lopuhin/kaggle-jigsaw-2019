@@ -62,7 +62,6 @@ def encode_comment(sp_model: sentencepiece.SentencePieceProcessor,
     start = sp_model.PieceToId('<s>')
     end = sp_model.PieceToId('</s>')
     eol = sp_model.PieceToId(EOL)
-    pad = sp_model.PieceToId('<pad>')
     encoded = [start]
     for i, line in enumerate(comment.split('\n')):
         if i:
@@ -71,6 +70,4 @@ def encode_comment(sp_model: sentencepiece.SentencePieceProcessor,
     encoded.append(end)
     if max_len is not None:
         encoded = encoded[:max_len]
-        if len(encoded) < max_len:
-            encoded.extend([pad] * (max_len - len(encoded)))
     return encoded
