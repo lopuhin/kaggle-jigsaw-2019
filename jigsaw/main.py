@@ -79,7 +79,10 @@ def main():
 
     sp_model = load_sp_model(params['sp_model'])
     if action != 'submit':
-        df = pd.read_pickle(DATA_ROOT / 'train.pkl')
+        train_pkl_path = DATA_ROOT / 'train.pkl'
+        if not train_pkl_path.exists():
+            pd.read_csv(DATA_ROOT / 'train.csv').to_pickle(train_pkl_path)
+        df = pd.read_pickle(train_pkl_path)
         kfold = KFold(n_splits=10, shuffle=True, random_state=42)
         train_ids, valid_ids = next(kfold.split(df))
         train_df, valid_df = df.iloc[train_ids], df.iloc[valid_ids]
