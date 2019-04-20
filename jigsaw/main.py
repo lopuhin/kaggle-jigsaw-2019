@@ -4,6 +4,7 @@ from pathlib import Path
 import statistics
 import shutil
 
+import fastText
 import json_log_plots
 import pandas as pd
 from sklearn.model_selection import KFold
@@ -20,6 +21,10 @@ from . import models
 
 
 class JigsawDataset(Dataset):
+    AUX_TARGETS = [
+        'target',
+        'severe_toxicity', 'obscene', 'identity_attack', 'insult', 'threat']
+
     def __init__(self, df, sp_model, max_len: int):
         super().__init__()
         self.df = df
@@ -36,7 +41,10 @@ class JigsawDataset(Dataset):
                                  max_len=self.max_len)
         comment = torch.tensor(comment, dtype=torch.int64)
         if self.has_target:
-            target = torch.tensor([float(item.target >= 0.5)])
+            target = torch.tensor(
+                [float(item.target >= 0.5)] +
+                [getattr(item, col) for col in self.AUX_TARGETS])
+            assert not torch.isnan(target).any()
             return comment, target
         else:
             return comment
@@ -79,6 +87,8 @@ def main():
     arg('--validate-every', type=int, default=1000)
     arg('--clean', action='store_true')
     arg('--n-embed', type=int, default=128)
+    arg('--embed-init')
+    arg('--embed-freeze', type=int, default=0)
     args = parser.parse_args()
 
     run_path = Path(args.run_path)
@@ -131,15 +141,29 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model_cls = getattr(models, params['model'])
+    n_aux = len(JigsawDataset.AUX_TARGETS)
     model: nn.Module = model_cls(
         n_vocab=len(sp_model),
         n_embed=params['n_embed'],
+        n_out=1 + n_aux,
     )
     if action == 'train':
+        if params['embed_freeze']:
+            model.embedding.weight.requires_grad = False
+        if params['embed_init']:
+            print('loading embeddings')
+            ft_model = fastText.load_model(params['embed_init'])
+            for i in range(len(sp_model)):
+                model.embedding.weight[i] = torch.tensor(
+                    ft_model.get_word_vector(
+                        sp_model.IdToPiece(i).strip('▁')))
+            del ft_model
         print(model)
+
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=params['lr'])
-    criterion = nn.BCEWithLogitsLoss()
+    pos_weights = torch.tensor([1.0] + [1 / n_aux for _ in range(n_aux)])
+    criterion = nn.BCEWithLogitsLoss()  # TODO pass pos_weight
     step = 0
 
     def save():
@@ -161,14 +185,16 @@ def main():
         losses = []
         predictions = []
         model.eval()
-        for xs, lengths, indices, ys in tqdm.tqdm(
-                valid_loader, desc='validate', dynamic_ncols=True, leave=False):
-            xs, ys = xs.to(device), ys.to(device)
-            ys_pred = model(xs, lengths)
-            loss = criterion(ys_pred, ys)
-            losses.append(loss.item())
-            predictions.extend(
-                map(float, torch.sigmoid(ys_pred[indices, 0]).data.cpu()))
+        with torch.no_grad():
+            for xs, lengths, indices, ys in tqdm.tqdm(
+                    valid_loader,
+                    desc='validate', dynamic_ncols=True, leave=False):
+                xs, ys = xs.to(device), ys.to(device)
+                ys_pred = model(xs, lengths)
+                loss = criterion(ys_pred, ys)
+                losses.append(loss.item())
+                predictions.extend(
+                    map(float, torch.sigmoid(ys_pred[indices, 0]).data.cpu()))
         model.train()
         valid_loss_value = statistics.mean(losses)
         pred_df = valid_loader.dataset.df.copy()
@@ -193,11 +219,12 @@ def main():
             collate_fn=collate_fn,
         )
         predictions = []
-        for xs, lengths, indices in tqdm.tqdm(
-                test_loader, dynamic_ncols=True, leave=False):
-            xs = xs.to(device)
-            ys = torch.sigmoid(model(xs, lengths)[indices, 0])
-            predictions.extend(map(float, ys.data.cpu()))
+        with torch.no_grad():
+            for xs, lengths, indices in tqdm.tqdm(
+                    test_loader, dynamic_ncols=True, leave=False):
+                xs = xs.to(device)
+                ys = torch.sigmoid(model(xs, lengths)[indices, 0])
+                predictions.extend(map(float, ys.data.cpu()))
         test_df.pop('comment_text')
         test_df['prediction'] = predictions
         test_df.to_csv('submission.csv', index=None)
