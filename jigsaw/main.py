@@ -49,7 +49,8 @@ def collate_fn(inputs):
     else:
         inputs = list(enumerate(inputs))
     inputs = sorted(inputs, key=lambda x: len(x[1]), reverse=True)
-    indices = [x[0] for x in inputs]
+    inverse = {x[0]: i for i, x in enumerate(inputs)}
+    indices = [inverse[i] for i in range(len(inverse))]
     comments = [x[1] for x in inputs]
     if has_target:
         targets = torch.stack([x[2] for x in inputs])
@@ -164,10 +165,10 @@ def main():
                 valid_loader, desc='validate', dynamic_ncols=True, leave=False):
             xs, ys = xs.to(device), ys.to(device)
             ys_pred = model(xs, lengths)
-            predictions.extend(
-                map(float, torch.sigmoid(ys_pred[indices, 0]).data.cpu()))
             loss = criterion(ys_pred, ys)
             losses.append(loss.item())
+            predictions.extend(
+                map(float, torch.sigmoid(ys_pred[indices, 0]).data.cpu()))
         model.train()
         valid_loss_value = statistics.mean(losses)
         pred_df = valid_loader.dataset.df.copy()
