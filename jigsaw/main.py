@@ -82,6 +82,7 @@ def main():
     arg('--max-len', type=int, default=250)
     arg('--batch-size', type=int, default=512)
     arg('--lr', type=float, default=3e-4)
+    arg('--lr-power-base', type=float, default=1)
     arg('--epochs', type=int, default=10)
     arg('--workers', type=int, default=4)
     arg('--validate-every', type=int, default=1000)
@@ -162,8 +163,10 @@ def main():
 
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=params['lr'])
-    pos_weights = torch.tensor([1.0] + [1 / n_aux for _ in range(n_aux)])
-    criterion = nn.BCEWithLogitsLoss()  # TODO pass pos_weight
+    pos_weight = torch.tensor([float(n_aux)] + [1.0] * n_aux)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda epoch: params['lr_power_base'] ** epoch)
     step = 0
 
     def save():
@@ -233,6 +236,7 @@ def main():
         nonlocal step
         for _ in tqdm.trange(params['epochs'], desc='epoch',
                              dynamic_ncols=True):
+            lr_scheduler.step()
             pbar = tqdm.tqdm(train_loader, desc='train', dynamic_ncols=True)
             for batch in pbar:
                 loss_value = train_step(*batch)

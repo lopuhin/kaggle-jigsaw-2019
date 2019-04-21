@@ -17,12 +17,11 @@ class SimpleLSTM(nn.Module):
         self.embedding = nn.Embedding(n_vocab, n_embed)
         # self.embedding_dropout = SpatialDropout(0.2)
         self.lstm = nn.LSTM(n_embed, n_lstm,
-                            bidirectional=True, batch_first=True)
+                            bidirectional=True, batch_first=True, num_layers=1)
         self.linear_1 = nn.Linear(2 * n_lstm, n_linear)
         self.linear_2 = nn.Linear(n_linear, n_linear)
         # self.dropout = nn.Dropout(p=0.5)
         self.linear_out = nn.Linear(n_linear, n_out)
-        self.masked_mean = False  # TODO try it
 
     def forward(self, x, lengths):
         x = self.embedding(x)
@@ -30,10 +29,7 @@ class SimpleLSTM(nn.Module):
         x = pack_padded_sequence(x, lengths, batch_first=True)
         x, _ = self.lstm(x)
         x, _ = pad_packed_sequence(x, batch_first=True)
-        if self.masked_mean:
-            x = masked_mean(x, lengths)
-        else:
-            x = torch.mean(x, dim=1)
+        x = masked_mean(x, lengths) + torch.max(x, dim=1)[0]
         x = F.relu(self.linear_1(x))
         # x = self.dropout(x)
         x = F.relu(self.linear_2(x))
@@ -43,10 +39,11 @@ class SimpleLSTM(nn.Module):
 
 
 def masked_mean(x, lengths):
-    for i, l in enumerate(lengths):
-        x[i, l:] = 0
-        if l > 0:
-            x[i] /= l
+    n_batch, n_seq = x.shape[:2]
+    lengths = lengths.unsqueeze(0).t()
+    mask = (torch.arange(0, n_seq).unsqueeze(0).expand((n_batch, n_seq))
+            < lengths).float() / lengths.max(torch.tensor(1)).float()
+    x = x * mask.to(x.device).unsqueeze(2)
     return torch.sum(x, dim=1)
 
 
