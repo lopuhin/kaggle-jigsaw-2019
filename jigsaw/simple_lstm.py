@@ -4,18 +4,21 @@ https://www.kaggle.com/bminixhofer/simple-lstm-pytorch-version
 import os
 import time
 import random
+import logging
 
 import numpy as np
 import pandas as pd
-from tqdm._tqdm_notebook import tqdm_notebook as tqdm
+from tqdm import tqdm
 from keras.preprocessing import text, sequence
 import torch
 from torch import nn
 from torch.utils import data
 from torch.nn import functional as F
 
+from .dataset import DATA_ROOT
 
-def seed_everything(seed=1234):
+
+def seed_everything(seed):  # FIXME remove
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
@@ -24,11 +27,8 @@ def seed_everything(seed=1234):
     torch.backends.cudnn.deterministic = True
 
 
-seed_everything()  # FIXME remove
-
-
-CRAWL_EMBEDDING_PATH = '../input/fasttext-crawl-300d-2m/crawl-300d-2M.vec'
-GLOVE_EMBEDDING_PATH = '../input/glove840b300dtxt/glove.840B.300d.txt'
+CRAWL_EMBEDDING_PATH = DATA_ROOT / 'crawl-300d-2M.vec'
+GLOVE_EMBEDDING_PATH = DATA_ROOT / 'glove.840B.300d.txt'
 NUM_MODELS = 2
 LSTM_UNITS = 128
 DENSE_HIDDEN_UNITS = 4 * LSTM_UNITS
@@ -108,8 +108,9 @@ def train_model(model, train, test, loss_fn, output_dim, lr=0.001,
 
         all_test_preds.append(test_preds)
         elapsed_time = time.time() - start_time
-        print('Epoch {}/{} \t loss={:.4f} \t time={:.2f}s'.format(
-              epoch + 1, n_epochs, avg_loss, elapsed_time))
+        logging.info(
+            'Epoch {}/{} \t loss={:.4f} \t time={:.2f}s'.format(
+                epoch + 1, n_epochs, avg_loss, elapsed_time))
 
     if enable_checkpoint_ensemble:
         test_preds = np.average(
@@ -191,13 +192,17 @@ def preprocess(data):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(module)s: %(message)s')
+
     # Preprocessing
 
-    train = pd.read_csv(
-        '../input/jigsaw-unintended-bias-in-toxicity-classification/train.csv')
-    test = pd.read_csv(
-        '../input/jigsaw-unintended-bias-in-toxicity-classification/test.csv')
+    logging.info('reading train and test')
+    train = pd.read_csv(DATA_ROOT / 'train.csv')
+    test = pd.read_csv(DATA_ROOT / 'test.csv')
 
+    logging.info('pre-processing text')
     x_train = preprocess(train['comment_text'])
     y_train = np.where(train['target'] >= 0.5, 1, 0)
     y_aux_train = train[['target', 'severe_toxicity', 'obscene',
@@ -206,28 +211,33 @@ def main():
 
     max_features = None
 
+    logging.info('building tokenizer')
     tokenizer = text.Tokenizer()
     tokenizer.fit_on_texts(list(x_train) + list(x_test))
 
+    logging.info('applying tokenizer')
     x_train = tokenizer.texts_to_sequences(x_train)
     x_test = tokenizer.texts_to_sequences(x_test)
     x_train = sequence.pad_sequences(x_train, maxlen=MAX_LEN)
     x_test = sequence.pad_sequences(x_test, maxlen=MAX_LEN)
 
     max_features = max_features or len(tokenizer.word_index) + 1
-    print('max_features', max_features)
+    logging.info(f'max_features {max_features:,}')
 
+    logging.info('building crawl embedding matrix')
     crawl_matrix, unknown_words_crawl = build_matrix(
         tokenizer.word_index, CRAWL_EMBEDDING_PATH)
-    print('n unknown words (crawl): ', len(unknown_words_crawl))
+    logging.info(f'n unknown words (crawl): {len(unknown_words_crawl):,}')
 
+    logging.info('building glove embedding matrix')
     glove_matrix, unknown_words_glove = build_matrix(
         tokenizer.word_index, GLOVE_EMBEDDING_PATH)
-    print('n unknown words (glove): ', len(unknown_words_glove))
+    logging.info(f'n unknown words (glove): {len(unknown_words_glove):,}')
 
     embedding_matrix = np.concatenate([crawl_matrix, glove_matrix], axis=-1)
-    print(embedding_matrix.shape)
+    logging.info(f'embedding.matrix {embedding_matrix.shape}')
 
+    logging.info('building tensors')
     x_train_torch = torch.tensor(x_train, dtype=torch.long).cuda()
     x_test_torch = torch.tensor(x_test, dtype=torch.long).cuda()
     y_train_torch = torch.tensor(
@@ -242,7 +252,7 @@ def main():
     all_test_preds = []
 
     for model_idx in range(NUM_MODELS):
-        print('Model ', model_idx)
+        logging.info(f'Model {model_idx}')
         seed_everything(1234 + model_idx)
 
         model = NeuralNet(embedding_matrix, y_aux_train.shape[-1], max_features)
@@ -252,7 +262,6 @@ def main():
                                  output_dim=y_train_torch.shape[-1],
                                  loss_fn=nn.BCEWithLogitsLoss(reduction='mean'))
         all_test_preds.append(test_preds)
-        print()
 
     submission = pd.DataFrame.from_dict({
         'id': test['id'],
