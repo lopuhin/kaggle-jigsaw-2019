@@ -106,13 +106,3 @@ def _calculate_overall_auc(df, pred_col):
 def _power_mean(series, p):
     total = sum(np.power(series, p))
     return np.power(total / len(series), 1 / p)
-
-
-def _get_final_metric(bias_df, overall_auc):
-    bias_score = np.average([
-        _power_mean(bias_df[SUBGROUP_AUC], POWER),
-        _power_mean(bias_df[BPSN_AUC], POWER),
-        _power_mean(bias_df[BNSP_AUC], POWER)
-    ])
-    return ((OVERALL_MODEL_WEIGHT * overall_auc) +
-            ((1 - OVERALL_MODEL_WEIGHT) * bias_score))

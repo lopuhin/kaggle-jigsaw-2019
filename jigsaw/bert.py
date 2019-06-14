@@ -1,0 +1,237 @@
+"""
+Initial version based on
+https://www.kaggle.com/kernels/scriptcontent/14919317/download
+"""
+import argparse
+import json
+from functools import partial
+import shutil
+from pathlib import Path
+
+from apex import amp
+import json_log_plots
+import numpy as np
+import pandas as pd
+from pytorch_pretrained_bert import (
+    BertTokenizer, BertForSequenceClassification, BertAdam,
+)
+from torch import nn
+from torch import multiprocessing
+import torch.utils.data
+import tqdm
+
+from .metrics import compute_bias_metrics_for_model
+from .utils import DATA_ROOT
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    arg = parser.add_argument
+    arg('run_root')
+    arg('--train-size', type=int)
+    arg('--valid-size', type=int, default=50000)
+    arg('--bert', default='bert-base-uncased')
+    arg('--max-seq-length', default=220)
+    arg('--epochs', type=int, default=2)
+    arg('--validation', action='store_true')
+    arg('--checkpoint', type=int, default=1000)
+    arg('--clean', action='store_true')
+    args = parser.parse_args()
+
+    run_root = Path(args.run_root)
+    if args.clean and run_root.exists():
+        if input(f'Clean "{run_root.absolute()}"? ') == 'y':
+            shutil.rmtree(run_root)
+    if run_root.exists():
+        parser.error(f'{run_root} exists')
+    run_root.mkdir(exist_ok=True, parents=True)
+    params_str = json.dumps(vars(args), indent=4)
+    print(params_str)
+    (run_root / 'params.json').write_text(params_str)
+    shutil.copy(__file__, run_root)
+
+    device = torch.device('cuda')
+
+    train_pkl_path = DATA_ROOT / 'train.pkl'
+    if not train_pkl_path.exists():
+        pd.read_csv(DATA_ROOT / 'train.csv').to_pickle(train_pkl_path)
+    df = pd.read_pickle(train_pkl_path)
+    train_size = args.train_size
+    valid_size = args.valid_size
+    if train_size is None:
+        train_size = len(df) - valid_size
+    df = df.sample(train_size + valid_size, random_state=42)
+    print(f'Loaded {len(df):,} records')
+
+    df['comment_text'] = df['comment_text'].astype(str)
+    print('Loading tokenizer...')
+    tokenizer = BertTokenizer.from_pretrained(args.bert)
+    sequences = tokenize_lines(
+        df['comment_text'].fillna('DUMMY_VALUE'),
+        args.max_seq_length, tokenizer)
+    df = df.fillna(0)  # FIXME hmmm is this ok?
+
+    df = df.drop(['comment_text'], axis=1)
+    df['target'] = (df['target'] >= 0.5).astype(float)
+
+    X_train = sequences[:train_size]
+    y_columns = ['target']
+    y_train = df[y_columns].values[:train_size]
+    X_valid = sequences[train_size:]
+    y_valid = df[y_columns].values[train_size:]
+    df_valid = df.tail(valid_size)
+    print(f'X_train.shape={X_train.shape} y_train.shape={y_train.shape}')
+    print(f'X_valid.shape={X_valid.shape} y_valid.shape={y_valid.shape}')
+
+    print('Loading model...')
+    model = BertForSequenceClassification.from_pretrained(
+        args.bert, num_labels=len(y_columns))
+    model = model.to(device)
+    criterion = nn.BCEWithLogitsLoss()
+
+    def _run_validation():
+        return validation(
+            model=model, criterion=criterion,
+            X_valid=X_valid, y_valid=y_valid, df_valid=df_valid, device=device)
+
+    model_path = run_root / 'model.pt'
+    if args.validation:
+        model.load_state_dict(torch.load(model_path))
+        metrics = _run_validation()
+        for k, v in metrics.items():
+            if isinstance(v, float):
+                print(f'{v:.4f}  {k}')
+    else:
+        for model, epoch_pbar, loss, step in train(
+                model=model, criterion=criterion,
+                X=X_train, y=y_train, device=device, epochs=args.epochs,
+                yield_steps=args.checkpoint):
+            torch.save(model.state_dict(), model_path)
+            metrics = _run_validation()
+            metrics['loss'] = loss
+            epoch_pbar.set_postfix(valid_loss=f'{metrics["valid_loss"]:.4f}',
+                                   auc=f'{metrics["auc"]:.4f}')
+            json_log_plots.write_event(run_root, step=step, **metrics)
+
+
+def validation(*, model, criterion, X_valid, y_valid, device, df_valid):
+    model.eval()
+    valid_dataset = torch.utils.data.TensorDataset(
+        torch.tensor(X_valid, dtype=torch.long),
+        torch.tensor(y_valid, dtype=torch.float),
+    )
+    valid_loader = torch.utils.data.DataLoader(
+        valid_dataset, batch_size=32, shuffle=False)
+
+    valid_preds, losses = [], []
+    for i, (x_batch, y_batch) in enumerate(
+            tqdm.tqdm(valid_loader, desc='validation', leave=False)):
+        x_batch = x_batch.to(device)
+        y_batch = y_batch.to(device)
+        with torch.no_grad():
+            y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
+            loss = criterion(y_pred, y_batch)
+        losses.append(float(loss.item()))
+        valid_preds.extend(y_pred[:, 0].cpu().squeeze().numpy())
+
+    df_valid = df_valid.copy()
+    df_valid['y_pred'] = torch.sigmoid(torch.tensor(valid_preds)).numpy()
+
+    metrics = compute_bias_metrics_for_model(df_valid, 'y_pred')
+    metrics['valid_loss'] = np.mean(losses)
+    return metrics
+
+
+def train(
+        *, model, criterion, X, y, device, epochs,
+        lr=2e-5,
+        batch_size=32,
+        accumulation_steps=2,
+        yield_steps=1000,  # TODO tune?
+        ):
+    train_dataset = torch.utils.data.TensorDataset(
+        torch.tensor(X, dtype=torch.long),
+        torch.tensor(y, dtype=torch.float))
+
+    model.zero_grad()
+    model = model.to(device)
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer
+                    if not any(nd in n for nd in no_decay)],
+         'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay)],
+         'weight_decay': 0.0},
+    ]
+
+    num_train_optimization_steps = int(
+        epochs * len(train_dataset) / (batch_size * accumulation_steps))
+    optimizer = BertAdam(
+        optimizer_grouped_parameters,
+        lr=lr,
+        warmup=0.05,
+        t_total=num_train_optimization_steps)
+
+    # TODO check opt level
+    model, optimizer = amp.initialize(
+        model, optimizer, opt_level='O1', verbosity=0)
+    model.train()
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True)
+
+    smoothed_loss = None
+    step = 0
+    epoch_pbar = tqdm.trange(epochs)
+    for _ in epoch_pbar:
+        optimizer.zero_grad()
+        pbar = tqdm.tqdm(train_loader, leave=False)
+        for x_batch, y_batch in pbar:
+            step += 1
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+            y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
+            loss = criterion(y_pred, y_batch)
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+            if step % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+
+            if smoothed_loss is not None:
+                smoothed_loss = 0.98 * smoothed_loss + 0.02 * loss.item()
+            else:
+                smoothed_loss = loss.item()
+            pbar.set_postfix(loss=f'{smoothed_loss:.4f}')
+
+            if step % yield_steps == 0:
+                yield model, epoch_pbar, smoothed_loss, step * batch_size
+
+
+def tokenize_lines(texts, max_seq_length, tokenizer):
+    all_tokens = []
+    worker = partial(
+        tokenize, max_seq_length=max_seq_length, tokenizer=tokenizer)
+    with multiprocessing.Pool(processes=16) as pool:
+        for tokens in tqdm.tqdm(pool.imap(worker, texts, chunksize=100),
+                                total=len(texts), desc='tokenizing'):
+            all_tokens.append(tokens)
+    n_max_len = sum(t[-1] != 0 for t in all_tokens)
+    print(f'{n_max_len / len(texts):.1%} texts are '
+          f'at least {max_seq_length} tokens long')
+    return np.array(all_tokens)
+
+
+def tokenize(text, max_seq_length, tokenizer):
+    max_seq_length -= 2  # cls and sep
+    tokens_a = tokenizer.tokenize(text)
+    if len(tokens_a) > max_seq_length:
+        tokens_a = tokens_a[:max_seq_length]
+    return (tokenizer.convert_tokens_to_ids(['[CLS]'] + tokens_a + ['[SEP]']) +
+            [0] * (max_seq_length - len(tokens_a)))
+
+
+if __name__ == '__main__':
+    main()
