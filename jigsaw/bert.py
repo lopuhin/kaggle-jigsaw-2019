@@ -24,18 +24,22 @@ from .metrics import compute_bias_metrics_for_model
 from .utils import DATA_ROOT
 
 
+device = torch.device('cuda')
+
+
 def main():
     parser = argparse.ArgumentParser()
     arg = parser.add_argument
     arg('run_root')
     arg('--train-size', type=int)
-    arg('--valid-size', type=int, default=50000)
+    arg('--valid-size', type=int)
     arg('--bert', default='bert-base-uncased')
     arg('--max-seq-length', default=220)
     arg('--epochs', type=int, default=2)
     arg('--validation', action='store_true')
     arg('--checkpoint', type=int)
     arg('--clean', action='store_true')
+    arg('--fold', type=int, default=0)
     args = parser.parse_args()
 
     run_root = Path(args.run_root)
@@ -50,38 +54,31 @@ def main():
     (run_root / 'params.json').write_text(params_str)
     shutil.copy(__file__, run_root)
 
-    device = torch.device('cuda')
-
     train_pkl_path = DATA_ROOT / 'train.pkl'
     if not train_pkl_path.exists():
         pd.read_csv(DATA_ROOT / 'train.csv').to_pickle(train_pkl_path)
     df = pd.read_pickle(train_pkl_path)
-    train_size = args.train_size
-    valid_size = args.valid_size
-    if train_size is None:
-        train_size = len(df) - valid_size
-    df = df.sample(train_size + valid_size, random_state=42)
-    print(f'Loaded {len(df):,} records')
 
-    df['comment_text'] = df['comment_text'].astype(str)
+    y_columns = ['target']
+    df = df.fillna(0)  # FIXME hmmm is this ok?
+    df['target'] = (df['target'] >= 0.5).astype(float)
+    df['comment_text'] = df['comment_text'].astype(str).fillna('DUMMY_VALUE')
+
+    folds = json.loads((DATA_ROOT / 'folds.json').read_text())
+    valid_index = df['id'].isin(folds[args.fold])
+    df_train, df_valid = df[~valid_index], df[valid_index]
+    if args.train_size and len(df_train) > args.train_size:
+        df_train = df_train.sample(n=args.train_size, random_state=42)
+    if args.valid_size and len(df_valid) > args.valid_size:
+        df_valid = df_valid.sample(n=args.valid_size, random_state=42)
+
     print('Loading tokenizer...')
     tokenizer = BertTokenizer.from_pretrained(args.bert)
-    sequences = tokenize_lines(
-        df['comment_text'].fillna('DUMMY_VALUE'),
-        args.max_seq_length, tokenizer)
-    df = df.fillna(0)  # FIXME hmmm is this ok?
+    x_valid = tokenize_lines(
+        df_valid.pop('comment_text'), args.max_seq_length, tokenizer)
 
-    df = df.drop(['comment_text'], axis=1)
-    df['target'] = (df['target'] >= 0.5).astype(float)
-
-    X_train = sequences[:train_size]
-    y_columns = ['target']
-    y_train = df[y_columns].values[:train_size]
-    X_valid = sequences[train_size:]
-    y_valid = df[y_columns].values[train_size:]
-    df_valid = df.tail(valid_size)
-    print(f'X_train.shape={X_train.shape} y_train.shape={y_train.shape}')
-    print(f'X_valid.shape={X_valid.shape} y_valid.shape={y_valid.shape}')
+    y_valid = df_valid[y_columns].values
+    print(f'X_valid.shape={x_valid.shape} y_valid.shape={y_valid.shape}')
 
     print('Loading model...')
     model = BertForSequenceClassification.from_pretrained(
@@ -92,7 +89,7 @@ def main():
     def _run_validation():
         return validation(
             model=model, criterion=criterion,
-            X_valid=X_valid, y_valid=y_valid, df_valid=df_valid, device=device)
+            x_valid=x_valid, y_valid=y_valid, df_valid=df_valid)
 
     model_path = run_root / 'model.pt'
     best_model_path = run_root / 'model-best.pt'
@@ -104,11 +101,15 @@ def main():
             if isinstance(v, float):
                 print(f'{v:.4f}  {k}')
     else:
+        x_train = tokenize_lines(
+            df_train.pop('comment_text'), args.max_seq_length, tokenizer)
+        y_train = df_train[y_columns].values
+        print(f'X_train.shape={x_train.shape} y_train.shape={y_train.shape}')
+
         best_auc = 0
         for model, epoch_pbar, loss, step in train(
                 model=model, criterion=criterion,
-                X=X_train, y=y_train,
-                device=device, epochs=args.epochs,
+                x_train=x_train, y_train=y_train, epochs=args.epochs,
                 yield_steps=args.checkpoint or len(y_valid) // 8,
                 ):
             torch.save(model.state_dict(), model_path)
@@ -122,10 +123,10 @@ def main():
             json_log_plots.write_event(run_root, step=step, **metrics)
 
 
-def validation(*, model, criterion, X_valid, y_valid, device, df_valid):
+def validation(*, model, criterion, x_valid, y_valid, df_valid):
     model.eval()
     valid_dataset = torch.utils.data.TensorDataset(
-        torch.tensor(X_valid, dtype=torch.long),
+        torch.tensor(x_valid, dtype=torch.long),
         torch.tensor(y_valid, dtype=torch.float),
     )
     valid_loader = torch.utils.data.DataLoader(
@@ -151,14 +152,14 @@ def validation(*, model, criterion, X_valid, y_valid, device, df_valid):
 
 
 def train(
-        *, model, criterion, X, y, device, epochs, yield_steps,
+        *, model, criterion, x_train, y_train, epochs, yield_steps,
         lr=2e-5,
         batch_size=32,
         accumulation_steps=2,
         ):
     train_dataset = torch.utils.data.TensorDataset(
-        torch.tensor(X, dtype=torch.long),
-        torch.tensor(y, dtype=torch.float))
+        torch.tensor(x_train, dtype=torch.long),
+        torch.tensor(y_train, dtype=torch.float))
 
     model.zero_grad()
     model = model.to(device)
