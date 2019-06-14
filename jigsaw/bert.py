@@ -34,7 +34,7 @@ def main():
     arg('--max-seq-length', default=220)
     arg('--epochs', type=int, default=2)
     arg('--validation', action='store_true')
-    arg('--checkpoint', type=int, default=1000)
+    arg('--checkpoint', type=int)
     arg('--clean', action='store_true')
     args = parser.parse_args()
 
@@ -104,8 +104,10 @@ def main():
     else:
         for model, epoch_pbar, loss, step in train(
                 model=model, criterion=criterion,
-                X=X_train, y=y_train, device=device, epochs=args.epochs,
-                yield_steps=args.checkpoint):
+                X=X_train, y=y_train,
+                device=device, epochs=args.epochs,
+                yield_steps=args.checkpoint or len(y_valid) // 8,
+                ):
             torch.save(model.state_dict(), model_path)
             metrics = _run_validation()
             metrics['loss'] = loss
