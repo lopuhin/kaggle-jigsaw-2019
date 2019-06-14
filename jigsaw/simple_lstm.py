@@ -15,7 +15,7 @@ from torch import nn
 from torch.utils import data
 from torch.nn import functional as F
 
-from .dataset import DATA_ROOT
+from .utils import DATA_ROOT
 
 
 def seed_everything(seed):  # FIXME remove
@@ -85,7 +85,7 @@ def train_model(model, train, test, loss_fn, output_dim, lr=0.001,
         model.train()
         avg_loss = 0.
         
-        for data in tqdm(train_loader, disable=False):
+        for data in tqdm(train_loader):
             x_batch = data[:-1]
             y_batch = data[-1]
 

@@ -15,8 +15,9 @@ from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.rnn import pad_sequence
 import tqdm
 
-from .dataset import encode_comment, load_sp_model, SP_MODEL, DATA_ROOT
-from .metrics import compute_bias_metrics_for_model, MAIN_METRICS
+from ..utils import DATA_ROOT
+from .dataset import encode_comment, load_sp_model, SP_MODEL
+from ..metrics import compute_bias_metrics_for_model, MAIN_METRICS
 from . import models
 
 

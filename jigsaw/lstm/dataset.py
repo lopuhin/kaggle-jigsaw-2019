@@ -4,10 +4,6 @@ from typing import List
 
 import sentencepiece
 
-from .utils import ON_KAGGLE
-
-
-DATA_ROOT = Path('../input/jigsaw-2019' if ON_KAGGLE else './data')
 
 EOL = '</n>'
 VOCAB_SIZE = 16000
