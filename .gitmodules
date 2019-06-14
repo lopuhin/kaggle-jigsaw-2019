@@ -1,0 +1,6 @@
+[submodule "opt/apex"]
+	path = opt/apex
+	url = git@github.com:NVIDIA/apex.git
+[submodule "opt/pytorch-pretrained-BERT"]
+	path = opt/pytorch-pretrained-BERT
+	url = git@github.com:huggingface/pytorch-pretrained-BERT.git
