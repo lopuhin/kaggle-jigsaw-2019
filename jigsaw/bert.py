@@ -3,6 +3,7 @@ Initial version based on
 https://www.kaggle.com/yuval6967/toxic-bert-plain-vanila/
 """
 import argparse
+from collections import defaultdict
 import json
 from functools import partial
 import shutil
@@ -15,9 +16,11 @@ import pandas as pd
 from pytorch_pretrained_bert import (
     BertTokenizer, BertForSequenceClassification, BertAdam,
 )
+import torch
 from torch import nn
 from torch import multiprocessing
-import torch.utils.data
+from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data.sampler import BatchSampler, RandomSampler
 import tqdm
 
 from .metrics import compute_bias_metrics_for_model
@@ -34,7 +37,7 @@ def main():
     arg('--train-size', type=int)
     arg('--valid-size', type=int)
     arg('--bert', default='bert-base-uncased')
-    arg('--train-seq-length', type=int, default=224)
+    arg('--train-seq-length', type=int, default=256)
     arg('--test-seq-length', type=int, default=296)
     arg('--epochs', type=int, default=2)
     arg('--validation', action='store_true')
@@ -42,6 +45,7 @@ def main():
     arg('--checkpoint', type=int)
     arg('--clean', action='store_true')
     arg('--fold', type=int, default=0)
+    arg('--bucket', type=int, default=1)
     args = parser.parse_args()
 
     run_root = Path(args.run_root)
@@ -126,6 +130,7 @@ def main():
                     model=model, criterion=criterion,
                     x_train=x_train, y_train=y_train, epochs=args.epochs,
                     yield_steps=args.checkpoint or len(y_valid) // 8,
+                    bucket=args.bucket,
                     ):
                 if step == 0:
                     continue  # step 0 allows saving on Ctrl+C from the start
@@ -146,12 +151,11 @@ def main():
 
 
 def validation(*, model, criterion, x_valid, y_valid, df_valid):
-    valid_dataset = torch.utils.data.TensorDataset(
+    valid_dataset = TensorDataset(
         torch.tensor(x_valid, dtype=torch.long),
         torch.tensor(y_valid, dtype=torch.float),
     )
-    valid_loader = torch.utils.data.DataLoader(
-        valid_dataset, batch_size=32, shuffle=False)
+    valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False)
 
     valid_preds, losses = [], []
     model.eval()
@@ -175,12 +179,12 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid):
 
 
 def train(
-        *, model, criterion, x_train, y_train, epochs, yield_steps,
+        *, model, criterion, x_train, y_train, epochs, yield_steps, bucket,
         lr=2e-5,
         batch_size=32,
         accumulation_steps=2,
         ):
-    train_dataset = torch.utils.data.TensorDataset(
+    train_dataset = TensorDataset(
         torch.tensor(x_train, dtype=torch.long),
         torch.tensor(y_train, dtype=torch.float))
 
@@ -211,8 +215,13 @@ def train(
         model, optimizer, opt_level='O1', verbosity=0)
     model.train()
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True)
+    if bucket:
+        sampler = RandomSampler(train_dataset)
+        batch_sampler = BucketBatchSampler(sampler, batch_size, drop_last=False)
+        train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
+    else:
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True)
 
     smoothed_loss = None
     step = 0
@@ -228,6 +237,8 @@ def train(
         pbar = tqdm.tqdm(train_loader, leave=False)
         for x_batch, y_batch in pbar:
             step += 1
+            if bucket:
+                x_batch, y_batch = trim_tensors([x_batch, y_batch])
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
             y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
@@ -283,11 +294,8 @@ def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int):
     df = pd.read_csv(DATA_ROOT / 'test.csv')
     df = preprocess_df(df)
     x_test = tokenize_lines(df.pop('comment_text'), max_seq_length, tokenizer)
-    test_dataset = torch.utils.data.TensorDataset(
-        torch.tensor(x_test, dtype=torch.long),
-    )
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=32, shuffle=False)
+    test_dataset = TensorDataset(torch.tensor(x_test, dtype=torch.long))
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
     test_preds = []
     model.eval()
@@ -304,6 +312,53 @@ def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int):
     path = root / 'submission.csv'
     df.to_csv(path, index=None)
     print(f'Saved submission to {path}')
+
+
+class BucketBatchSampler(BatchSampler):
+    def __iter__(self):
+        k = 8
+        buckets = defaultdict(list)
+        lengths = (self.sampler.data_source.tensors[0] == 0).sum(dim=1).numpy()
+        for idx in self.sampler:
+            buckets[binned_length(lengths[idx], k)].append(idx)
+
+        rng = np.random.RandomState()
+        for i in range(len(self)):
+            batch = []
+            while len(batch) < self.batch_size:
+                if not batch:
+                    candidates = list(buckets)
+                p = np.array([len(buckets[x]) for x in candidates])
+                if p.sum() == 0:
+                    if len(candidates) == len(buckets):
+                        assert i == len(self) - 1
+                        break
+                    else:
+                        candidates = list(buckets)
+                        continue
+                length = rng.choice(candidates, p=p / p.sum())
+                idx = buckets[length].pop()
+                if not batch:
+                    # control efficiency vs. randomness
+                    if rng.rand() > 0.2:
+                        candidates = [x for x in buckets
+                                      if abs(x - length) <= 2 * k]
+                batch.append(idx)
+
+            yield batch
+
+
+def binned_length(length: int, k=8) -> int:
+    length = int(length)
+    binned = max(k, k * (length // k + (length % k > 0)))
+    assert binned % k == 0 and binned >= length and binned > 0
+    return binned
+
+
+def trim_tensors(tsrs):
+    max_len = binned_length(int(torch.max(torch.sum(tsrs[0] != 0, 1))))
+    tsrs = [tsr[:, :max_len] for tsr in tsrs]
+    return tsrs
 
 
 if __name__ == '__main__':
