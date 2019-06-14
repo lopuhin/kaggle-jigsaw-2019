@@ -1,6 +1,6 @@
 """
 Initial version based on
-https://www.kaggle.com/kernels/scriptcontent/14919317/download
+https://www.kaggle.com/yuval6967/toxic-bert-plain-vanila/
 """
 import argparse
 import json
