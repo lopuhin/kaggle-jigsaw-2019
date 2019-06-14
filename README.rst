@@ -28,3 +28,7 @@ Run validation separately::
 
     python -m jigsaw.bert _runs/example --validation
 
+Make submission::
+
+    python -m jigsaw.bert _runs/example --submission
+

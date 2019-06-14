@@ -21,7 +21,7 @@ import torch.utils.data
 import tqdm
 
 from .metrics import compute_bias_metrics_for_model
-from .utils import DATA_ROOT
+from .utils import DATA_ROOT, ON_KAGGLE
 
 
 device = torch.device('cuda')
@@ -34,9 +34,11 @@ def main():
     arg('--train-size', type=int)
     arg('--valid-size', type=int)
     arg('--bert', default='bert-base-uncased')
-    arg('--max-seq-length', default=220)
+    arg('--train-seq-length', type=int, default=224)
+    arg('--test-seq-length', type=int, default=296)
     arg('--epochs', type=int, default=2)
     arg('--validation', action='store_true')
+    arg('--submission', action='store_true')
     arg('--checkpoint', type=int)
     arg('--clean', action='store_true')
     arg('--fold', type=int, default=0)
@@ -46,23 +48,39 @@ def main():
     if args.clean and run_root.exists():
         if input(f'Clean "{run_root.absolute()}"? ') == 'y':
             shutil.rmtree(run_root)
-    if run_root.exists():
-        parser.error(f'{run_root} exists')
-    run_root.mkdir(exist_ok=True, parents=True)
-    params_str = json.dumps(vars(args), indent=4)
-    print(params_str)
-    (run_root / 'params.json').write_text(params_str)
-    shutil.copy(__file__, run_root)
+    do_train = not (args.submission or args.validation)
+    if do_train:
+        if run_root.exists():
+            parser.error(f'{run_root} exists')
+        run_root.mkdir(exist_ok=True, parents=True)
+        params_str = json.dumps(vars(args), indent=4)
+        print(params_str)
+        (run_root / 'params.json').write_text(params_str)
+        shutil.copy(__file__, run_root)
+
+    print('Loading tokenizer...')
+    tokenizer = BertTokenizer.from_pretrained(args.bert)
+    y_columns = ['target']
+    print('Loading model...')
+    model = BertForSequenceClassification.from_pretrained(
+        args.bert, num_labels=len(y_columns))
+    model = model.to(device)
+
+    model_path = run_root / 'model.pt'
+    optimizer_path = run_root / 'optimizer.pt'
+    best_model_path = run_root / 'model-best.pt'
+
+    if args.submission:
+        model.load_state_dict(torch.load(best_model_path))
+        make_submission(model=model, tokenizer=tokenizer,
+                        run_root=run_root, max_seq_length=args.test_seq_length)
+        return
 
     train_pkl_path = DATA_ROOT / 'train.pkl'
     if not train_pkl_path.exists():
         pd.read_csv(DATA_ROOT / 'train.csv').to_pickle(train_pkl_path)
     df = pd.read_pickle(train_pkl_path)
-
-    y_columns = ['target']
-    df = df.fillna(0)  # FIXME hmmm is this ok?
-    df['target'] = (df['target'] >= 0.5).astype(float)
-    df['comment_text'] = df['comment_text'].astype(str).fillna('DUMMY_VALUE')
+    df = preprocess_df(df)
 
     folds = json.loads((DATA_ROOT / 'folds.json').read_text())
     valid_index = df['id'].isin(folds[args.fold])
@@ -72,18 +90,11 @@ def main():
     if args.valid_size and len(df_valid) > args.valid_size:
         df_valid = df_valid.sample(n=args.valid_size, random_state=42)
 
-    print('Loading tokenizer...')
-    tokenizer = BertTokenizer.from_pretrained(args.bert)
     x_valid = tokenize_lines(
-        df_valid.pop('comment_text'), args.max_seq_length, tokenizer)
-
+        df_valid.pop('comment_text'), args.test_seq_length, tokenizer)
     y_valid = df_valid[y_columns].values
     print(f'X_valid.shape={x_valid.shape} y_valid.shape={y_valid.shape}')
 
-    print('Loading model...')
-    model = BertForSequenceClassification.from_pretrained(
-        args.bert, num_labels=len(y_columns))
-    model = model.to(device)
     criterion = nn.BCEWithLogitsLoss()
 
     def _run_validation():
@@ -91,8 +102,10 @@ def main():
             model=model, criterion=criterion,
             x_valid=x_valid, y_valid=y_valid, df_valid=df_valid)
 
-    model_path = run_root / 'model.pt'
-    best_model_path = run_root / 'model-best.pt'
+    def _save(step, model, optimizer):
+        torch.save(model.state_dict(), model_path)
+        torch.save({'optimizer': optimizer.state_dict(), 'step': step},
+                   optimizer_path)
 
     if args.validation:
         model.load_state_dict(torch.load(best_model_path))
@@ -102,29 +115,37 @@ def main():
                 print(f'{v:.4f}  {k}')
     else:
         x_train = tokenize_lines(
-            df_train.pop('comment_text'), args.max_seq_length, tokenizer)
+            df_train.pop('comment_text'), args.train_seq_length, tokenizer)
         y_train = df_train[y_columns].values
         print(f'X_train.shape={x_train.shape} y_train.shape={y_train.shape}')
 
         best_auc = 0
-        for model, epoch_pbar, loss, step in train(
-                model=model, criterion=criterion,
-                x_train=x_train, y_train=y_train, epochs=args.epochs,
-                yield_steps=args.checkpoint or len(y_valid) // 8,
-                ):
-            torch.save(model.state_dict(), model_path)
-            metrics = _run_validation()
-            metrics['loss'] = loss
-            if metrics['auc'] > best_auc:
-                best_auc = metrics['auc']
-                shutil.copy(model_path, best_model_path)
-            epoch_pbar.set_postfix(valid_loss=f'{metrics["valid_loss"]:.4f}',
-                                   auc=f'{metrics["auc"]:.4f}')
-            json_log_plots.write_event(run_root, step=step, **metrics)
+        step = optimizer = None
+        try:
+            for model, optimizer, epoch_pbar, loss, step in train(
+                    model=model, criterion=criterion,
+                    x_train=x_train, y_train=y_train, epochs=args.epochs,
+                    yield_steps=args.checkpoint or len(y_valid) // 8,
+                    ):
+                if step == 0:
+                    continue  # step 0 allows saving on Ctrl+C from the start
+                _save(step, model, optimizer)
+                metrics = _run_validation()
+                metrics['loss'] = loss
+                if metrics['auc'] > best_auc:
+                    best_auc = metrics['auc']
+                    shutil.copy(model_path, best_model_path)
+                epoch_pbar.set_postfix(valid_loss=f'{metrics["valid_loss"]:.4f}',
+                                       auc=f'{metrics["auc"]:.4f}')
+                json_log_plots.write_event(run_root, step=step, **metrics)
+        except KeyboardInterrupt:
+            if step is not None and optimizer is not None:
+                print('Ctrl+C pressed, saving checkpoint')
+                _save(step, model, optimizer)
+            raise
 
 
 def validation(*, model, criterion, x_valid, y_valid, df_valid):
-    model.eval()
     valid_dataset = torch.utils.data.TensorDataset(
         torch.tensor(x_valid, dtype=torch.long),
         torch.tensor(y_valid, dtype=torch.float),
@@ -133,6 +154,7 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid):
         valid_dataset, batch_size=32, shuffle=False)
 
     valid_preds, losses = [], []
+    model.eval()
     for i, (x_batch, y_batch) in enumerate(
             tqdm.tqdm(valid_loader, desc='validation', leave=False)):
         x_batch = x_batch.to(device)
@@ -142,6 +164,7 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid):
             loss = criterion(y_pred, y_batch)
         losses.append(float(loss.item()))
         valid_preds.extend(y_pred[:, 0].cpu().squeeze().numpy())
+    model.train()
 
     df_valid = df_valid.copy()
     df_valid['y_pred'] = torch.sigmoid(torch.tensor(valid_preds)).numpy()
@@ -194,6 +217,12 @@ def train(
     smoothed_loss = None
     step = 0
     epoch_pbar = tqdm.trange(epochs)
+
+    def _state():
+        return model, optimizer, epoch_pbar, smoothed_loss, step * batch_size
+
+    yield _state()
+
     for _ in epoch_pbar:
         optimizer.zero_grad()
         pbar = tqdm.tqdm(train_loader, leave=False)
@@ -216,14 +245,14 @@ def train(
             pbar.set_postfix(loss=f'{smoothed_loss:.4f}')
 
             if step % yield_steps == 0:
-                yield model, epoch_pbar, smoothed_loss, step * batch_size
+                yield _state()
 
 
 def tokenize_lines(texts, max_seq_length, tokenizer):
     all_tokens = []
     worker = partial(
         tokenize, max_seq_length=max_seq_length, tokenizer=tokenizer)
-    with multiprocessing.Pool(processes=16) as pool:
+    with multiprocessing.Pool(processes=4 if ON_KAGGLE else 16) as pool:
         for tokens in tqdm.tqdm(pool.imap(worker, texts, chunksize=100),
                                 total=len(texts), desc='tokenizing'):
             all_tokens.append(tokens)
@@ -240,6 +269,41 @@ def tokenize(text, max_seq_length, tokenizer):
         tokens_a = tokens_a[:max_seq_length]
     return (tokenizer.convert_tokens_to_ids(['[CLS]'] + tokens_a + ['[SEP]']) +
             [0] * (max_seq_length - len(tokens_a)))
+
+
+def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
+    if 'target' in df.columns:
+        df = df.fillna(0)  # FIXME hmmm is this ok?
+        df['target'] = (df['target'] >= 0.5).astype(float)
+    df['comment_text'] = df['comment_text'].astype(str).fillna('DUMMY_VALUE')
+    return df
+
+
+def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int):
+    df = pd.read_csv(DATA_ROOT / 'test.csv')
+    df = preprocess_df(df)
+    x_test = tokenize_lines(df.pop('comment_text'), max_seq_length, tokenizer)
+    test_dataset = torch.utils.data.TensorDataset(
+        torch.tensor(x_test, dtype=torch.long),
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=32, shuffle=False)
+
+    test_preds = []
+    model.eval()
+    for i, (x_batch, ) in enumerate(
+            tqdm.tqdm(test_loader, desc='submission', leave=False)):
+        x_batch = x_batch.to(device)
+        with torch.no_grad():
+            y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
+        test_preds.extend(y_pred[:, 0].cpu().squeeze().numpy())
+    model.train()
+
+    df['prediction'] = torch.sigmoid(torch.tensor(test_preds)).numpy()
+    root = Path('.') if ON_KAGGLE else run_root
+    path = root / 'submission.csv'
+    df.to_csv(path, index=None)
+    print(f'Saved submission to {path}')
 
 
 if __name__ == '__main__':
