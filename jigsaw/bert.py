@@ -95,13 +95,16 @@ def main():
             X_valid=X_valid, y_valid=y_valid, df_valid=df_valid, device=device)
 
     model_path = run_root / 'model.pt'
+    best_model_path = run_root / 'model-best.pt'
+
     if args.validation:
-        model.load_state_dict(torch.load(model_path))
+        model.load_state_dict(torch.load(best_model_path))
         metrics = _run_validation()
         for k, v in metrics.items():
             if isinstance(v, float):
                 print(f'{v:.4f}  {k}')
     else:
+        best_auc = 0
         for model, epoch_pbar, loss, step in train(
                 model=model, criterion=criterion,
                 X=X_train, y=y_train,
@@ -111,6 +114,9 @@ def main():
             torch.save(model.state_dict(), model_path)
             metrics = _run_validation()
             metrics['loss'] = loss
+            if metrics['auc'] > best_auc:
+                best_auc = metrics['auc']
+                shutil.copy(model_path, best_model_path)
             epoch_pbar.set_postfix(valid_loss=f'{metrics["valid_loss"]:.4f}',
                                    auc=f'{metrics["auc"]:.4f}')
             json_log_plots.write_event(run_root, step=step, **metrics)
@@ -145,11 +151,10 @@ def validation(*, model, criterion, X_valid, y_valid, device, df_valid):
 
 
 def train(
-        *, model, criterion, X, y, device, epochs,
+        *, model, criterion, X, y, device, epochs, yield_steps,
         lr=2e-5,
         batch_size=32,
         accumulation_steps=2,
-        yield_steps=1000,  # TODO tune?
         ):
     train_dataset = torch.utils.data.TensorDataset(
         torch.tensor(X, dtype=torch.long),
@@ -170,13 +175,14 @@ def train(
 
     num_train_optimization_steps = int(
         epochs * len(train_dataset) / (batch_size * accumulation_steps))
+    print(f'Starting training for {num_train_optimization_steps:,} steps, '
+          f'checkpoint interval {yield_steps:,}')
     optimizer = BertAdam(
         optimizer_grouped_parameters,
         lr=lr,
         warmup=0.05,
         t_total=num_train_optimization_steps)
 
-    # TODO check opt level
     model, optimizer = amp.initialize(
         model, optimizer, opt_level='O1', verbosity=0)
     model.train()
