@@ -17,7 +17,7 @@ from pytorch_pretrained_bert import (
     BertTokenizer, BertForSequenceClassification, BertAdam,
 )
 import torch
-from torch import nn
+from torch.nn import functional as F
 from torch import multiprocessing
 from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
@@ -64,10 +64,9 @@ def main():
 
     print('Loading tokenizer...')
     tokenizer = BertTokenizer.from_pretrained(args.bert)
-    y_columns = ['target']
     print('Loading model...')
     model = BertForSequenceClassification.from_pretrained(
-        args.bert, num_labels=len(y_columns))
+        args.bert, num_labels=7)
     model = model.to(device)
 
     model_path = run_root / 'model.pt'
@@ -97,10 +96,11 @@ def main():
 
     x_valid = tokenize_lines(
         df_valid.pop('comment_text'), args.test_seq_length, tokenizer)
-    y_valid = df_valid[y_columns].values
+    y_valid, _ = get_target(df_valid)
+    y_train, loss_weight = get_target(df_train)
     print(f'X_valid.shape={x_valid.shape} y_valid.shape={y_valid.shape}')
 
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = partial(get_loss, loss_weight=loss_weight)
 
     def _run_validation():
         return validation(
@@ -124,7 +124,6 @@ def main():
 
     x_train = tokenize_lines(
         df_train.pop('comment_text'), args.train_seq_length, tokenizer)
-    y_train = df_train[y_columns].values
     print(f'X_train.shape={x_train.shape} y_train.shape={y_train.shape}')
 
     best_auc = 0
@@ -153,6 +152,13 @@ def main():
             print('Ctrl+C pressed, saving checkpoint')
             _save(step, model, optimizer)
         raise
+
+
+def get_loss(pred, targets, loss_weight):
+    bce_loss_1 = F.binary_cross_entropy_with_logits(
+        pred[:, :1], targets[:, :1], weight=targets[:, 1:2])
+    bce_loss_2 = F.binary_cross_entropy_with_logits(pred[:, 1:], targets[:, 2:])
+    return (bce_loss_1 * loss_weight) + bce_loss_2
 
 
 def validation(*, model, criterion, x_valid, y_valid, df_valid):
@@ -290,9 +296,6 @@ def tokenize(text, max_seq_length, tokenizer):
 
 
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
-    if 'target' in df.columns:
-        df = df.fillna(0)  # FIXME hmmm is this ok?
-        df['target'] = (df['target'] >= 0.5).astype(float)
     df['comment_text'] = df['comment_text'].astype(str).fillna('DUMMY_VALUE')
     return df
 
