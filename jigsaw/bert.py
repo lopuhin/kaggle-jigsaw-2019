@@ -37,7 +37,7 @@ def main():
     arg('--train-size', type=int)
     arg('--valid-size', type=int)
     arg('--bert', default='bert-base-uncased')
-    arg('--train-seq-length', type=int, default=256)
+    arg('--train-seq-length', type=int, default=224)
     arg('--test-seq-length', type=int, default=296)
     arg('--epochs', type=int, default=2)
     arg('--validation', action='store_true')
