@@ -73,6 +73,7 @@ def main():
     model_path = run_root / 'model.pt'
     optimizer_path = run_root / 'optimizer.pt'
     best_model_path = run_root / 'model-best.pt'
+    valid_predictions_path = run_root / 'valid-predictions.csv'
 
     if args.submission:
         model.load_state_dict(torch.load(best_model_path))
@@ -112,9 +113,8 @@ def main():
         for k, v in metrics.items():
             if isinstance(v, float):
                 print(f'{v:.4f}  {k}')
-        out_path = run_root / 'valid-predictions.csv'
-        valid_predictions.to_csv(out_path, index=None)
-        print(f'Saved validation predictions to {out_path}')
+        valid_predictions.to_csv(valid_predictions_path, index=None)
+        print(f'Saved validation predictions to {valid_predictions_path}')
         return
 
     def _save(step, model, optimizer):
@@ -139,11 +139,12 @@ def main():
             if step == 0:
                 continue  # step 0 allows saving on Ctrl+C from the start
             _save(step, model, optimizer)
-            metrics, _ = _run_validation()
+            metrics, valid_predictions = _run_validation()
             metrics['loss'] = loss
             if metrics['auc'] > best_auc:
                 best_auc = metrics['auc']
                 shutil.copy(model_path, best_model_path)
+                valid_predictions.to_csv(valid_predictions_path, index=None)
             epoch_pbar.set_postfix(valid_loss=f'{metrics["valid_loss"]:.4f}',
                                    auc=f'{metrics["auc"]:.4f}')
             json_log_plots.write_event(run_root, step=step, **metrics)
