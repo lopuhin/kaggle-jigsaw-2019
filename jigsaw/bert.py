@@ -23,7 +23,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 import tqdm
 
-from .metrics import compute_bias_metrics_for_model
+from .metrics import compute_bias_metrics_for_model, IDENTITY_COLUMNS
 from .utils import DATA_ROOT, ON_KAGGLE
 
 
@@ -288,6 +288,37 @@ def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
         df['target'] = (df['target'] >= 0.5).astype(float)
     df['comment_text'] = df['comment_text'].astype(str).fillna('DUMMY_VALUE')
     return df
+
+
+def get_target(df_train):
+    y_aux_train = df_train[['target', 'severe_toxicity', 'obscene',
+                            'identity_attack', 'insult', 'threat']]
+    # Overall
+    weights = np.ones((len(df_train),)) / 4
+
+    # TODO can we avoid fillna?
+    # Subgroup
+    weights += ((df_train[IDENTITY_COLUMNS].fillna(0).values >= 0.5)
+                .sum(axis=1).astype(bool).astype(np.int) / 4)
+
+    # Background Positive, Subgroup Negative
+    weights += (
+        ((df_train['target'].values >= 0.5).astype(bool).astype(np.int) +
+         (df_train[IDENTITY_COLUMNS].fillna(0).values < 0.5)
+         .sum(axis=1).astype(bool).astype(np.int))
+        > 1).astype(bool).astype(np.int) / 4
+
+    # Background Negative, Subgroup Positive
+    weights += (
+        ((df_train['target'].values < 0.5).astype(bool).astype(np.int) +
+         (df_train[IDENTITY_COLUMNS].fillna(0).values >= 0.5)
+         .sum(axis=1).astype(bool).astype(np.int))
+        > 1 ).astype(bool).astype(np.int) / 4
+
+    loss_weight = 1.0 / weights.mean()
+    y_train = np.vstack(
+        [(df_train['target'].values >= 0.5).astype(np.int), weights]).T
+    return np.hstack([y_train, y_aux_train])
 
 
 def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int):
