@@ -20,7 +20,7 @@ def main():
     blend_df = dfs[0].copy()
     blend_df['prediction'] = np.mean(
         [df['prediction'].values for df in dfs], axis=0)
-    blend_df.to_csv(args.out)
+    blend_df.to_csv(args.out, index=None)
     print(f'Saved blend to {args.out}')
 
 
