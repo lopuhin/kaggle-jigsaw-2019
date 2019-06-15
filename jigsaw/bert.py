@@ -106,48 +106,52 @@ def main():
             model=model, criterion=criterion,
             x_valid=x_valid, y_valid=y_valid, df_valid=df_valid)
 
+    if args.validation:
+        model.load_state_dict(torch.load(best_model_path))
+        metrics, valid_predictions = _run_validation()
+        for k, v in metrics.items():
+            if isinstance(v, float):
+                print(f'{v:.4f}  {k}')
+        out_path = run_root / 'valid-predictions.csv'
+        valid_predictions.to_csv(out_path, index=None)
+        print(f'Saved validation predictions to {out_path}')
+        return
+
     def _save(step, model, optimizer):
         torch.save(model.state_dict(), model_path)
         torch.save({'optimizer': optimizer.state_dict(), 'step': step},
                    optimizer_path)
 
-    if args.validation:
-        model.load_state_dict(torch.load(best_model_path))
-        metrics = _run_validation()
-        for k, v in metrics.items():
-            if isinstance(v, float):
-                print(f'{v:.4f}  {k}')
-    else:
-        x_train = tokenize_lines(
-            df_train.pop('comment_text'), args.train_seq_length, tokenizer)
-        y_train = df_train[y_columns].values
-        print(f'X_train.shape={x_train.shape} y_train.shape={y_train.shape}')
+    x_train = tokenize_lines(
+        df_train.pop('comment_text'), args.train_seq_length, tokenizer)
+    y_train = df_train[y_columns].values
+    print(f'X_train.shape={x_train.shape} y_train.shape={y_train.shape}')
 
-        best_auc = 0
-        step = optimizer = None
-        try:
-            for model, optimizer, epoch_pbar, loss, step in train(
-                    model=model, criterion=criterion,
-                    x_train=x_train, y_train=y_train, epochs=args.epochs,
-                    yield_steps=args.checkpoint or len(y_valid) // 8,
-                    bucket=args.bucket,
-                    ):
-                if step == 0:
-                    continue  # step 0 allows saving on Ctrl+C from the start
-                _save(step, model, optimizer)
-                metrics = _run_validation()
-                metrics['loss'] = loss
-                if metrics['auc'] > best_auc:
-                    best_auc = metrics['auc']
-                    shutil.copy(model_path, best_model_path)
-                epoch_pbar.set_postfix(valid_loss=f'{metrics["valid_loss"]:.4f}',
-                                       auc=f'{metrics["auc"]:.4f}')
-                json_log_plots.write_event(run_root, step=step, **metrics)
-        except KeyboardInterrupt:
-            if step is not None and optimizer is not None:
-                print('Ctrl+C pressed, saving checkpoint')
-                _save(step, model, optimizer)
-            raise
+    best_auc = 0
+    step = optimizer = None
+    try:
+        for model, optimizer, epoch_pbar, loss, step in train(
+                model=model, criterion=criterion,
+                x_train=x_train, y_train=y_train, epochs=args.epochs,
+                yield_steps=args.checkpoint or len(y_valid) // 8,
+                bucket=args.bucket,
+                ):
+            if step == 0:
+                continue  # step 0 allows saving on Ctrl+C from the start
+            _save(step, model, optimizer)
+            metrics, _ = _run_validation()
+            metrics['loss'] = loss
+            if metrics['auc'] > best_auc:
+                best_auc = metrics['auc']
+                shutil.copy(model_path, best_model_path)
+            epoch_pbar.set_postfix(valid_loss=f'{metrics["valid_loss"]:.4f}',
+                                   auc=f'{metrics["auc"]:.4f}')
+            json_log_plots.write_event(run_root, step=step, **metrics)
+    except KeyboardInterrupt:
+        if step is not None and optimizer is not None:
+            print('Ctrl+C pressed, saving checkpoint')
+            _save(step, model, optimizer)
+        raise
 
 
 def validation(*, model, criterion, x_valid, y_valid, df_valid):
@@ -171,11 +175,11 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid):
     model.train()
 
     df_valid = df_valid.copy()
-    df_valid['y_pred'] = torch.sigmoid(torch.tensor(valid_preds)).numpy()
+    df_valid['prediction'] = torch.sigmoid(torch.tensor(valid_preds)).numpy()
 
-    metrics = compute_bias_metrics_for_model(df_valid, 'y_pred')
+    metrics = compute_bias_metrics_for_model(df_valid, 'prediction')
     metrics['valid_loss'] = np.mean(losses)
-    return metrics
+    return metrics, df_valid
 
 
 def train(
@@ -203,7 +207,8 @@ def train(
 
     num_train_optimization_steps = int(
         epochs * len(train_dataset) / (batch_size * accumulation_steps))
-    print(f'Starting training for {num_train_optimization_steps:,} steps, '
+    print(f'Starting training for '
+          f'{num_train_optimization_steps * accumulation_steps:,} steps, '
           f'checkpoint interval {yield_steps:,}')
     optimizer = BertAdam(
         optimizer_grouped_parameters,
@@ -257,6 +262,7 @@ def train(
 
             if step % yield_steps == 0:
                 yield _state()
+        yield _state()
 
 
 def tokenize_lines(texts, max_seq_length, tokenizer):
@@ -318,7 +324,7 @@ def get_target(df_train):
     loss_weight = 1.0 / weights.mean()
     y_train = np.vstack(
         [(df_train['target'].values >= 0.5).astype(np.int), weights]).T
-    return np.hstack([y_train, y_aux_train])
+    return np.hstack([y_train, y_aux_train]), loss_weight
 
 
 def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int):

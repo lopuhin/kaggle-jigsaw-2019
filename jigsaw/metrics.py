@@ -1,4 +1,6 @@
+import argparse
 from typing import Dict
+
 
 import numpy as np
 import pandas as pd
@@ -106,3 +108,28 @@ def _calculate_overall_auc(df, pred_col):
 def _power_mean(series, p):
     total = sum(np.power(series, p))
     return np.power(total / len(series), 1 / p)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('valid_predictions', nargs='+')
+    parser.add_argument('--column', default='prediction')
+    args = parser.parse_args()
+
+    dfs = []
+    for path in args.valid_predictions:
+        df = pd.read_csv(path)
+        dfs.append(df)
+        metrics = compute_bias_metrics_for_model(df, args.column)
+        print(f'{metrics["auc"]:.4f} for {path}')
+
+    if len(dfs) > 1:
+        blend_df = dfs[0].copy()
+        blend_df[args.column] = np.mean(
+            [df[args.column].values for df in dfs], axis=0)
+        metrics = compute_bias_metrics_for_model(blend_df, args.column)
+        print(f'{metrics["auc"]:.4f} for blend')
+
+
+if __name__ == '__main__':
+    main()
