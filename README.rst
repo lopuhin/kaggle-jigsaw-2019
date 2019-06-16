@@ -26,7 +26,7 @@ Prepare corpus for pre-training::
 
 Pre-train the model (set ``--do_lower_case`` only for uncased models!)::
 
-    python opt/pytorch-pretrained-BERT/examples/lm_finetuning/simple_lm_finetuning.py \
+    python -m jigsaw.bert_lm_finetuning \
          --do_train \
          --fp16 \
          --on_memory \
