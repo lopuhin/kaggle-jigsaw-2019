@@ -43,10 +43,11 @@ def main():
     arg('--validation', action='store_true')
     arg('--submission', action='store_true')
     arg('--lr', type=float, default=2e-5)
-    arg('--checkpoint', type=int)
+    arg('--checkpoint-interval', type=int)
     arg('--clean', action='store_true')
     arg('--fold', type=int, default=0)
     arg('--bucket', type=int, default=1)
+    arg('--load-weights', help='load weights for training')
     args = parser.parse_args()
 
     run_root = Path(args.run_root)
@@ -123,6 +124,13 @@ def main():
         torch.save({'optimizer': optimizer.state_dict(), 'step': step},
                    optimizer_path)
 
+    if args.load_weights:
+        print(f'Loading weights from {args.load_weights}')
+        load_info = model.load_state_dict(
+            torch.load(args.load_weights), strict=False)
+        if load_info:
+            print(load_info)
+
     x_train = tokenize_lines(
         df_train.pop('comment_text'), args.train_seq_length, tokenizer)
     print(f'X_train.shape={x_train.shape} y_train.shape={y_train.shape}')
@@ -133,7 +141,7 @@ def main():
         for model, optimizer, epoch_pbar, loss, step in train(
                 model=model, criterion=criterion,
                 x_train=x_train, y_train=y_train, epochs=args.epochs,
-                yield_steps=args.checkpoint or len(y_valid) // 8,
+                yield_steps=args.checkpoint_interval or len(y_valid) // 8,
                 bucket=args.bucket, lr=args.lr,
                 ):
             if step == 0:
