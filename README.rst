@@ -27,11 +27,11 @@ Prepare corpus for pre-training::
 Pre-train the model (set ``--do_lower_case`` only for uncased models!)::
 
     python -m jigsaw.bert_lm_finetuning \
-         --do_train \
-         --fp16 \
-         --on_memory \
-         --max_seq_length 104 \
-         --num_train_epochs 1 \
+        --do_train \
+        --fp16 \
+        --on_memory \
+        --max_seq_length 104 \
+        --num_train_epochs 1 \
         --train_corpus data/corpus.txt \
         --bert_model bert-base-uncased \
         --do_lower_case \
