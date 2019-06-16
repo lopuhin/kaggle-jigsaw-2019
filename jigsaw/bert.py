@@ -313,7 +313,6 @@ def get_target(df_train):
     # Overall
     weights = np.ones((len(df_train),)) / 4
 
-    # TODO can we avoid fillna?
     # Subgroup
     weights += ((df_train[IDENTITY_COLUMNS].fillna(0).values >= 0.5)
                 .sum(axis=1).astype(bool).astype(np.int) / 4)
