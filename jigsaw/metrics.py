@@ -22,6 +22,7 @@ MAIN_METRICS = [
 def compute_bias_metrics_for_model(df: pd.DataFrame, pred_col: str) -> Dict:
     """ Computes per-subgroup metrics for all subgroups and one model.
     """
+    df = df[df['identity_annotator_count'] > 0]
     df = _convert_dataframe_to_bool(df)
     records = []
     metrics = {}
