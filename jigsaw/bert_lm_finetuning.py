@@ -128,8 +128,11 @@ class BERTDataset(Dataset):
         # combine to one sample
         cur_example = InputExample(guid=cur_id, tokens_a=tokens_a, tokens_b=tokens_b, is_next=is_next_label)
 
-        # transform sample to features
-        cur_features = convert_example_to_features(cur_example, self.seq_len, self.tokenizer)
+        try:
+            # transform sample to features
+            cur_features = convert_example_to_features(cur_example, self.seq_len, self.tokenizer)
+        except AssertionError:
+            return self[random.randint(0, len(self) - 1)]
 
         cur_tensors = (torch.tensor(cur_features.input_ids),
                        torch.tensor(cur_features.input_mask),
