@@ -42,6 +42,7 @@ def main():
     arg('--epochs', type=int, default=2)
     arg('--validation', action='store_true')
     arg('--submission', action='store_true')
+    arg('--lr', type=float, default=2e-5)
     arg('--checkpoint', type=int)
     arg('--clean', action='store_true')
     arg('--fold', type=int, default=0)
@@ -133,7 +134,7 @@ def main():
                 model=model, criterion=criterion,
                 x_train=x_train, y_train=y_train, epochs=args.epochs,
                 yield_steps=args.checkpoint or len(y_valid) // 8,
-                bucket=args.bucket,
+                bucket=args.bucket, lr=args.lr,
                 ):
             if step == 0:
                 continue  # step 0 allows saving on Ctrl+C from the start
@@ -190,10 +191,8 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid):
 
 
 def train(
-        *, model, criterion, x_train, y_train, epochs, yield_steps, bucket,
-        lr=2e-5,
-        batch_size=32,
-        accumulation_steps=2,
+        *, model, criterion, x_train, y_train, epochs, yield_steps, bucket, lr,
+        batch_size=32, accumulation_steps=2,
         ):
     train_dataset = TensorDataset(
         torch.tensor(x_train, dtype=torch.long),
