@@ -567,26 +567,36 @@ def main():
                                  warmup=args.warmup_proportion,
                                  t_total=num_train_optimization_steps)
 
+    if not args.do_train:
+        return
+
+    def save():
+        # Save a trained model
+        logger.info("** ** * Saving fine - tuned model ** ** * ")
+        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+        output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
+        torch.save(model_to_save.state_dict(), output_model_file)
+
     global_step = 0
-    if args.do_train:
-        logger.info("***** Running training *****")
-        logger.info("  Num examples = %d", len(train_dataset))
-        logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_optimization_steps)
+    logger.info("***** Running training *****")
+    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Batch size = %d", args.train_batch_size)
+    logger.info("  Num steps = %d", num_train_optimization_steps)
 
-        if args.local_rank == -1:
-            train_sampler = RandomSampler(train_dataset)
-        else:
-            #TODO: check if this works with current data generator from disk that relies on next(file)
-            # (it doesn't return item back by index)
-            train_sampler = DistributedSampler(train_dataset)
-        train_dataloader = DataLoader(
-            train_dataset, sampler=train_sampler,
-            batch_size=args.train_batch_size,
-            num_workers=2)
+    if args.local_rank == -1:
+        train_sampler = RandomSampler(train_dataset)
+    else:
+        #TODO: check if this works with current data generator from disk that relies on next(file)
+        # (it doesn't return item back by index)
+        train_sampler = DistributedSampler(train_dataset)
+    train_dataloader = DataLoader(
+        train_dataset, sampler=train_sampler,
+        batch_size=args.train_batch_size,
+        num_workers=2)
 
-        model.train()
-        nb_tr_examples, nb_tr_steps = 0, 0
+    model.train()
+    nb_tr_examples, nb_tr_steps = 0, 0
+    try:
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_losses = deque(maxlen=20)
             pbar = tqdm(train_dataloader, desc="Iteration")
@@ -621,13 +631,14 @@ def main():
                     json_log_plots.write_event(
                         Path(args.output_dir), nb_tr_examples,
                         loss=np.mean(tr_losses))
+                if (step + 1) % 10000 == 0:
+                    save()
 
-        # Save a trained model
-        logger.info("** ** * Saving fine - tuned model ** ** * ")
-        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-        if args.do_train:
-            torch.save(model_to_save.state_dict(), output_model_file)
+    except KeyboardInterrupt:
+        print('Ctrl+C pressed, saving checkpoint')
+        save()
+        raise
+    save()
 
 
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
