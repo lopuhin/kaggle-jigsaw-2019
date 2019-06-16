@@ -30,6 +30,7 @@ Pre-train the model (set ``--do_lower_case`` only for uncased models!)::
          --do_train \
          --fp16 \
          --on_memory \
+         --max_seq_length 104 \
          --num_train_epochs 1 \
         --train_corpus data/corpus.txt \
         --bert_model bert-base-uncased \

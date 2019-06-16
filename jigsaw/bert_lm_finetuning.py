@@ -15,14 +15,15 @@
 # limitations under the License.
 """BERT finetuning runner."""
 
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 import argparse
+from collections import deque
 import logging
 import os
 import random
 from io import open
+from pathlib import Path
 
+import json_log_plots
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, RandomSampler
@@ -579,13 +580,17 @@ def main():
             #TODO: check if this works with current data generator from disk that relies on next(file)
             # (it doesn't return item back by index)
             train_sampler = DistributedSampler(train_dataset)
-        train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+        train_dataloader = DataLoader(
+            train_dataset, sampler=train_sampler,
+            batch_size=args.train_batch_size,
+            num_workers=2)
 
         model.train()
+        nb_tr_examples, nb_tr_steps = 0, 0
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
-            tr_loss = 0
-            nb_tr_examples, nb_tr_steps = 0, 0
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            tr_losses = deque(maxlen=20)
+            pbar = tqdm(train_dataloader, desc="Iteration")
+            for step, batch in enumerate(pbar):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, lm_label_ids, is_next = batch
                 loss = model(input_ids, segment_ids, input_mask, lm_label_ids, is_next)
@@ -597,7 +602,6 @@ def main():
                     optimizer.backward(loss)
                 else:
                     loss.backward()
-                tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -610,6 +614,13 @@ def main():
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1
+
+                tr_losses.append(loss.item())
+                pbar.set_postfix(loss=f'{np.mean(tr_losses):.4f}')
+                if (step + 1) % 20 == 0:
+                    json_log_plots.write_event(
+                        Path(args.output_dir), nb_tr_examples,
+                        loss=np.mean(tr_losses))
 
         # Save a trained model
         logger.info("** ** * Saving fine - tuned model ** ** * ")
