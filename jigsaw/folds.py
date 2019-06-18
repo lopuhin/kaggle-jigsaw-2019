@@ -3,11 +3,15 @@ from pathlib import Path
 
 import pandas as pd
 
+from .utils import DATA_ROOT
 from .metrics import IDENTITY_COLUMNS
 
 
 def main():
-    df = pd.read_pickle('data/train.pkl')
+    train_pkl_path = DATA_ROOT / 'train.pkl'
+    if not train_pkl_path.exists():
+        pd.read_csv(DATA_ROOT / 'train.csv').to_pickle(train_pkl_path)
+    df = pd.read_pickle(train_pkl_path)
     annot_df = (df[df['identity_annotator_count'] > 0]
                 .sample(n=48660, random_state=13))
     not_annot_df = (df[df['identity_annotator_count'] == 0]

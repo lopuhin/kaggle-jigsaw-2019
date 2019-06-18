@@ -6,10 +6,14 @@ https://www.kaggle.com/c/jigsaw-unintended-bias-in-toxicity-classification/
 Use Python 3.6. First install appropriate PyTorch 1.1.0 package. After that::
 
     pip install -r requirements.txt
+    git submodule update --init
     cd opt/apex
     pip install -v --no-cache-dir \
         --global-option="--cpp_ext" --global-option="--cuda_ext" .
+    cd -
+    cd opt/pytorch-pretrained-BERT/
     pip install -e .
+    cd -
 
 Put data into ``./data``::
 
