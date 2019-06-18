@@ -111,6 +111,13 @@ class BERTDataset(Dataset):
         return self.corpus_lines - self.num_docs - 1
 
     def __getitem__(self, item):
+        try:
+            return self._getitem(item)
+        except Exception as e:
+            print(e)
+            return self[random.randint(0, len(self) - 1)]
+
+    def _getitem(self, item):
         cur_id = self.sample_counter
         self.sample_counter += 1
         if not self.on_memory:
@@ -128,11 +135,8 @@ class BERTDataset(Dataset):
         # combine to one sample
         cur_example = InputExample(guid=cur_id, tokens_a=tokens_a, tokens_b=tokens_b, is_next=is_next_label)
 
-        try:
-            # transform sample to features
-            cur_features = convert_example_to_features(cur_example, self.seq_len, self.tokenizer)
-        except AssertionError:
-            return self[random.randint(0, len(self) - 1)]
+        # transform sample to features
+        cur_features = convert_example_to_features(cur_example, self.seq_len, self.tokenizer)
 
         cur_tensors = (torch.tensor(cur_features.input_ids),
                        torch.tensor(cur_features.input_mask),
@@ -209,6 +213,8 @@ class BERTDataset(Dataset):
             if self.on_memory:
                 rand_doc_idx = random.randint(0, len(self.all_docs)-1)
                 rand_doc = self.all_docs[rand_doc_idx]
+                if len(rand_doc) == 0:
+                    continue
                 line = rand_doc[random.randrange(len(rand_doc))]
             else:
                 rand_index = random.randint(1, self.corpus_lines if self.corpus_lines < 1000 else 1000)
