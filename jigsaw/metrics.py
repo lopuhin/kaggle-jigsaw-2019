@@ -1,6 +1,5 @@
 import argparse
-from typing import Dict
-
+from typing import Dict, List, Union
 
 import numpy as np
 import pandas as pd
@@ -110,10 +109,26 @@ def _power_mean(series, p):
     return np.power(total / len(series), 1 / p)
 
 
+def blend(dfs, weights: Union[str, List[float]], column: str):
+    blend_df = dfs[0].copy()
+    if weights:
+        if isinstance(weights, str):
+            weights = list(map(float, weights.split(',')))
+    else:
+        weights = [1] * len(dfs)
+    assert len(weights) == len(dfs)
+    weights = [w / sum(weights) for w in weights]
+    blend_df[column] = np.mean(
+        [w * df[column].values for w, df in zip(weights, dfs)],
+        axis=0)
+    return blend_df
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('valid_predictions', nargs='+')
     parser.add_argument('--column', default='prediction')
+    parser.add_argument('--weights', help='comma separated')
     args = parser.parse_args()
 
     dfs = []
@@ -124,11 +139,9 @@ def main():
         print(f'{metrics["auc"]:.4f} for {path}')
 
     if len(dfs) > 1:
-        blend_df = dfs[0].copy()
-        blend_df[args.column] = np.mean(
-            [df[args.column].values for df in dfs], axis=0)
+        blend_df = blend(dfs, args.weights, args.column)
         metrics = compute_bias_metrics_for_model(blend_df, args.column)
-        print(f'{metrics["auc"]:.4f} for blend')
+        print(f'{metrics["auc"]:.5f} for blend')
 
 
 if __name__ == '__main__':

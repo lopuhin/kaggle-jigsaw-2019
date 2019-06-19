@@ -3,11 +3,14 @@ import argparse
 import numpy as np
 import pandas as pd
 
+from .metrics import blend
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('submissions', nargs='+')
     parser.add_argument('--out', default='submission.csv')
+    parser.add_argument('--weights', help='comma separated')
     args = parser.parse_args()
 
     if len(args.submissions) < 2:
@@ -17,9 +20,7 @@ def main():
         df = pd.read_csv(path)
         dfs.append(df)
 
-    blend_df = dfs[0].copy()
-    blend_df['prediction'] = np.mean(
-        [df['prediction'].values for df in dfs], axis=0)
+    blend_df = blend(dfs, args.weights, 'prediction')
     blend_df.to_csv(args.out, index=None)
     print(f'Saved blend to {args.out}')
 
