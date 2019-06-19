@@ -28,7 +28,7 @@ Prepare corpus for pre-training::
 
     python -m jigsaw.corpus data/corpus.txt
 
-Pre-train the model (set ``--do_lower_case`` only for uncased models!)::
+Pre-train the model::
 
     python -m jigsaw.bert_lm_finetuning \
         --do_train \
@@ -40,6 +40,18 @@ Pre-train the model (set ``--do_lower_case`` only for uncased models!)::
         --bert_model bert-base-uncased \
         --do_lower_case \
         --output _runs/pretrained-bert-uncased-ep1
+
+or for cased model::
+
+    python -m jigsaw.bert_lm_finetuning \
+        --do_train \
+        --fp16 \
+        --on_memory \
+        --max_seq_length 104 \
+        --num_train_epochs 1 \
+        --train_corpus data/corpus.txt \
+        --bert_model bert-base-cased \
+        --output _runs/pretrained-bert-cased-ep1
 
 Commands below don't use pre-trained model yet.
 
