@@ -251,6 +251,7 @@ def train(
 
     yield _state()
 
+    torch.cuda.empty_cache()
     for _ in epoch_pbar:
         optimizer.zero_grad()
         pbar = tqdm.tqdm(train_loader, leave=False)
@@ -276,7 +277,11 @@ def train(
 
             if step % yield_steps == 0:
                 yield _state()
+            if step % 50 == 0:
+                torch.cuda.empty_cache()
+
         yield _state()
+        torch.cuda.empty_cache()
 
 
 def tokenize_lines(texts, max_seq_length, tokenizer):
