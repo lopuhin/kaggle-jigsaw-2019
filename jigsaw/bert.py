@@ -261,13 +261,20 @@ def train(
                 x_batch, y_batch = trim_tensors([x_batch, y_batch])
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
-            y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
-            loss = criterion(y_pred, y_batch)
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-            if step % accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
+            try:
+                y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
+                loss = criterion(y_pred, y_batch)
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+                if step % accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+            except RuntimeError as e:
+                if 'CUDA out of memory' in str(e):
+                    print('ignoring', e)
+                    torch.cuda.empty_cache()
+                    continue
+                raise
 
             if smoothed_loss is not None:
                 smoothed_loss = 0.98 * smoothed_loss + 0.02 * loss.item()
@@ -277,8 +284,6 @@ def train(
 
             if step % yield_steps == 0:
                 yield _state()
-            if step % 50 == 0:
-                torch.cuda.empty_cache()
 
         yield _state()
         torch.cuda.empty_cache()
