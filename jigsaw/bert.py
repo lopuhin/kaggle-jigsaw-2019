@@ -43,6 +43,8 @@ def main():
     arg('--validation', action='store_true')
     arg('--submission', action='store_true')
     arg('--lr', type=float, default=2e-5)
+    arg('--batch-size', type=int, default=32)
+    arg('--accumulation-steps', type=int, default=2)
     arg('--checkpoint-interval', type=int)
     arg('--clean', action='store_true')
     arg('--fold', type=int, default=0)
@@ -79,7 +81,8 @@ def main():
     if args.submission:
         model.load_state_dict(torch.load(best_model_path))
         make_submission(model=model, tokenizer=tokenizer,
-                        run_root=run_root, max_seq_length=args.test_seq_length)
+                        run_root=run_root, max_seq_length=args.test_seq_length,
+                        batch_size=args.batch_size)
         return
 
     train_pkl_path = DATA_ROOT / 'train.pkl'
@@ -107,7 +110,8 @@ def main():
     def _run_validation():
         return validation(
             model=model, criterion=criterion,
-            x_valid=x_valid, y_valid=y_valid, df_valid=df_valid)
+            x_valid=x_valid, y_valid=y_valid, df_valid=df_valid,
+            batch_size=args.batch_size)
 
     if args.validation:
         model.load_state_dict(torch.load(best_model_path))
@@ -142,7 +146,10 @@ def main():
                 model=model, criterion=criterion,
                 x_train=x_train, y_train=y_train, epochs=args.epochs,
                 yield_steps=args.checkpoint_interval or len(y_valid) // 8,
-                bucket=args.bucket, lr=args.lr,
+                bucket=args.bucket,
+                lr=args.lr,
+                batch_size=args.batch_size,
+                accumulation_steps=args.accumulation_steps,
                 ):
             if step == 0:
                 continue  # step 0 allows saving on Ctrl+C from the start
@@ -170,12 +177,14 @@ def get_loss(pred, targets, loss_weight):
     return (bce_loss_1 * loss_weight) + bce_loss_2
 
 
-def validation(*, model, criterion, x_valid, y_valid, df_valid):
+def validation(*, model, criterion, x_valid, y_valid, df_valid,
+               batch_size: int):
     valid_dataset = TensorDataset(
         torch.tensor(x_valid, dtype=torch.long),
         torch.tensor(y_valid, dtype=torch.float),
     )
-    valid_loader = DataLoader(valid_dataset, batch_size=32, shuffle=False)
+    valid_loader = DataLoader(
+        valid_dataset, batch_size=batch_size, shuffle=False)
 
     valid_preds, losses = [], []
     model.eval()
@@ -200,7 +209,7 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid):
 
 def train(
         *, model, criterion, x_train, y_train, epochs, yield_steps, bucket, lr,
-        batch_size=32, accumulation_steps=2,
+        batch_size: int, accumulation_steps: int,
         ):
     train_dataset = TensorDataset(
         torch.tensor(x_train, dtype=torch.long),
@@ -347,12 +356,13 @@ def get_target(df_train):
     return np.hstack([y_train, y_aux_train]), loss_weight
 
 
-def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int):
+def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
+                    batch_size: int):
     df = pd.read_csv(DATA_ROOT / 'test.csv')
     df = preprocess_df(df)
     x_test = tokenize_lines(df.pop('comment_text'), max_seq_length, tokenizer)
     test_dataset = TensorDataset(torch.tensor(x_test, dtype=torch.long))
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     test_preds = []
     model.eval()
