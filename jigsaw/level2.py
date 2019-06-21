@@ -4,7 +4,7 @@ from scipy.special import expit, logit
 from .metrics import compute_bias_metrics_for_model, IDENTITY_COLUMNS
 
 
-def improve_predictions(preds, iterative=False, min_gain=1e-5):
+def improve_predictions(preds, iterative=True, min_gain=1e-5):
     preds = preds.copy()
     base_auc = compute_bias_metrics_for_model(preds, 'prediction')['auc']
     results = []
