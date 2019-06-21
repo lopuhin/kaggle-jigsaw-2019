@@ -5,6 +5,7 @@ from .metrics import compute_bias_metrics_for_model, IDENTITY_COLUMNS
 
 
 def improve_predictions(preds, iterative=True, min_gain=1e-5):
+    # TODO handle intersecting identities?
     preds = preds.copy()
     base_auc = compute_bias_metrics_for_model(preds, 'prediction')['auc']
     results = []
