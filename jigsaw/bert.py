@@ -15,8 +15,9 @@ import numpy as np
 import pandas as pd
 from pytorch_pretrained_bert import (
     BertTokenizer, BertForSequenceClassification, BertAdam,
-)
+    GPT2Tokenizer, OpenAIAdam, GPT2Model)
 import torch
+from torch import nn
 from torch.nn import functional as F
 from torch import multiprocessing
 from torch.utils.data import TensorDataset, DataLoader
@@ -28,6 +29,7 @@ from .utils import DATA_ROOT, ON_KAGGLE
 
 
 device = torch.device('cuda')
+GPT2_PAD = '<pad>'
 
 
 def main():
@@ -36,7 +38,7 @@ def main():
     arg('run_root')
     arg('--train-size', type=int)
     arg('--valid-size', type=int)
-    arg('--bert', default='bert-base-uncased')
+    arg('--model', default='bert-base-uncased')
     arg('--train-seq-length', type=int, default=224)
     arg('--test-seq-length', type=int, default=296)
     arg('--epochs', type=int, default=2)
@@ -66,11 +68,28 @@ def main():
         (run_root / 'params.json').write_text(params_str)
         shutil.copy(__file__, run_root)
 
+    use_bert = args.model.startswith('bert')
+    use_gpt2 = args.model.startswith('gpt2')
+
     print('Loading tokenizer...')
-    tokenizer = BertTokenizer.from_pretrained(args.bert)
+    if use_bert:
+        tokenizer = BertTokenizer.from_pretrained(args.model)
+        pad_idx = 0
+    elif use_gpt2:
+        tokenizer = GPT2Tokenizer.from_pretrained(args.model)
+        tokenizer.set_special_tokens([GPT2_PAD])
+        pad_idx, = tokenizer.convert_tokens_to_ids([GPT2_PAD])
+    else:
+        raise ValueError
+
     print('Loading model...')
-    model = BertForSequenceClassification.from_pretrained(
-        args.bert, num_labels=7)
+    num_labels = 7
+    if use_bert:
+        model = BertForSequenceClassification.from_pretrained(
+            args.model, num_labels=num_labels)
+    else:
+        model = GPT2ClassificationHeadModel(args.model, num_labels=num_labels)
+        model.set_num_special_tokens(1)
     model = model.to(device)
 
     model_path = run_root / 'model.pt'
@@ -82,7 +101,9 @@ def main():
         model.load_state_dict(torch.load(best_model_path))
         make_submission(model=model, tokenizer=tokenizer,
                         run_root=run_root, max_seq_length=args.test_seq_length,
-                        batch_size=args.batch_size)
+                        batch_size=args.batch_size,
+                        pad_idx=pad_idx,
+                        use_bert=use_bert)
         return
 
     train_pkl_path = DATA_ROOT / 'train.pkl'
@@ -100,7 +121,8 @@ def main():
         df_valid = df_valid.sample(n=args.valid_size, random_state=42)
 
     x_valid = tokenize_lines(
-        df_valid.pop('comment_text'), args.test_seq_length, tokenizer)
+        df_valid.pop('comment_text'), args.test_seq_length, tokenizer,
+        use_bert=use_bert, pad_idx=pad_idx)
     y_valid, _ = get_target(df_valid)
     y_train, loss_weight = get_target(df_train)
     print(f'X_valid.shape={x_valid.shape} y_valid.shape={y_valid.shape}')
@@ -136,7 +158,8 @@ def main():
             print(load_info)
 
     x_train = tokenize_lines(
-        df_train.pop('comment_text'), args.train_seq_length, tokenizer)
+        df_train.pop('comment_text'), args.train_seq_length, tokenizer,
+        use_bert=use_bert, pad_idx=pad_idx)
     print(f'X_train.shape={x_train.shape} y_train.shape={y_train.shape}')
 
     best_auc = 0
@@ -209,7 +232,7 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid,
 
 def train(
         *, model, criterion, x_train, y_train, epochs, yield_steps, bucket, lr,
-        batch_size: int, accumulation_steps: int,
+        batch_size: int, accumulation_steps: int
         ):
     train_dataset = TensorDataset(
         torch.tensor(x_train, dtype=torch.long),
@@ -218,26 +241,32 @@ def train(
     model.zero_grad()
     model = model.to(device)
     param_optimizer = list(model.named_parameters())
-    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer
-                    if not any(nd in n for nd in no_decay)],
-         'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer
-                    if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0},
-    ]
 
     num_train_optimization_steps = int(
         epochs * len(train_dataset) / (batch_size * accumulation_steps))
-    print(f'Starting training for '
-          f'{num_train_optimization_steps * accumulation_steps:,} steps, '
-          f'checkpoint interval {yield_steps:,}')
-    optimizer = BertAdam(
-        optimizer_grouped_parameters,
-        lr=lr,
-        warmup=0.05,
-        t_total=num_train_optimization_steps)
+    if isinstance(model, BertForSequenceClassification):
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in param_optimizer
+                        if not any(nd in n for nd in no_decay)],
+             'weight_decay': 0.01},
+            {'params': [p for n, p in param_optimizer
+                        if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+        ]
+        optimizer = BertAdam(
+            optimizer_grouped_parameters,
+            lr=lr,
+            warmup=0.05,
+            t_total=num_train_optimization_steps)
+    elif isinstance(model, GPT2ClassificationHeadModel):
+        optimizer = OpenAIAdam(
+            param_optimizer,
+            lr=lr,
+            warmup=0.1,
+            t_total=num_train_optimization_steps)
+    else:
+        raise ValueError
 
     model, optimizer = amp.initialize(
         model, optimizer, opt_level='O1', verbosity=0)
@@ -257,6 +286,10 @@ def train(
 
     def _state():
         return model, optimizer, epoch_pbar, smoothed_loss, step * batch_size
+
+    print(f'Starting training for '
+          f'{num_train_optimization_steps * accumulation_steps:,} steps, '
+          f'checkpoint interval {yield_steps:,}')
 
     yield _state()
 
@@ -298,10 +331,11 @@ def train(
         torch.cuda.empty_cache()
 
 
-def tokenize_lines(texts, max_seq_length, tokenizer):
+def tokenize_lines(texts, max_seq_length, tokenizer, use_bert: bool, pad_idx):
     all_tokens = []
     worker = partial(
-        tokenize, max_seq_length=max_seq_length, tokenizer=tokenizer)
+        tokenize, max_seq_length=max_seq_length, tokenizer=tokenizer,
+        use_bert=use_bert, pad_idx=pad_idx)
     with multiprocessing.Pool(processes=4 if ON_KAGGLE else 16) as pool:
         for tokens in tqdm.tqdm(pool.imap(worker, texts, chunksize=100),
                                 total=len(texts), desc='tokenizing'):
@@ -312,13 +346,17 @@ def tokenize_lines(texts, max_seq_length, tokenizer):
     return np.array(all_tokens)
 
 
-def tokenize(text, max_seq_length, tokenizer):
-    max_seq_length -= 2  # cls and sep
+def tokenize(text, max_seq_length, tokenizer, use_bert: bool, pad_idx: int):
+    trim_seq_length = max_seq_length
+    if use_bert:
+        trim_seq_length = max_seq_length - 2  # cls and sep
     tokens_a = tokenizer.tokenize(text)
-    if len(tokens_a) > max_seq_length:
-        tokens_a = tokens_a[:max_seq_length]
-    return (tokenizer.convert_tokens_to_ids(['[CLS]'] + tokens_a + ['[SEP]']) +
-            [0] * (max_seq_length - len(tokens_a)))
+    if len(tokens_a) > trim_seq_length:
+        tokens_a = tokens_a[:trim_seq_length]
+    if use_bert:
+        tokens_a = ['[CLS]'] + tokens_a + ['[SEP]']
+    return (tokenizer.convert_tokens_to_ids(tokens_a) +
+            [pad_idx] * (max_seq_length - len(tokens_a)))
 
 
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -357,10 +395,11 @@ def get_target(df_train):
 
 
 def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
-                    batch_size: int):
+                    batch_size: int, pad_idx, use_bert):
     df = pd.read_csv(DATA_ROOT / 'test.csv')
     df = preprocess_df(df)
-    x_test = tokenize_lines(df.pop('comment_text'), max_seq_length, tokenizer)
+    x_test = tokenize_lines(df.pop('comment_text'), max_seq_length, tokenizer,
+                            pad_idx=pad_idx, use_bert=use_bert)
     test_dataset = TensorDataset(torch.tensor(x_test, dtype=torch.long))
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
@@ -426,6 +465,27 @@ def trim_tensors(tsrs):
     max_len = binned_length(int(torch.max(torch.sum(tsrs[0] != 0, 1))))
     tsrs = [tsr[:, :max_len] for tsr in tsrs]
     return tsrs
+
+
+class GPT2ClassificationHeadModel(nn.Module):
+    def __init__(self, model_name, num_labels: int, clf_dropout=0.2):
+        super().__init__()
+        self.transformer = GPT2Model.from_pretrained(model_name)
+        self.dropout = nn.Dropout(clf_dropout)
+        self.linear = nn.Linear(self.transformer.config.n_embd * 2, num_labels)
+        nn.init.normal_(self.linear.weight, std=0.02)
+        nn.init.normal_(self.linear.bias, 0)
+
+    def forward(self, input_ids, attention_mask=None,
+                position_ids=None, token_type_ids=None,
+                labels=None, past=None):
+        hidden_states, presents = self.transformer(
+            input_ids, position_ids, token_type_ids, past)
+        avg_pool = torch.mean(hidden_states, 1)
+        max_pool, _ = torch.max(hidden_states, 1)
+        h_conc = torch.cat((avg_pool, max_pool), 1)
+        logits = self.linear(self.dropout(h_conc))
+        return logits
 
 
 if __name__ == '__main__':
