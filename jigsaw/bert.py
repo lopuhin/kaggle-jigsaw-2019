@@ -261,7 +261,7 @@ def train(
             t_total=num_train_optimization_steps)
     elif isinstance(model, GPT2ClassificationHeadModel):
         optimizer = OpenAIAdam(
-            param_optimizer,
+            [p for _, p in param_optimizer],
             lr=lr,
             warmup=0.1,
             t_total=num_train_optimization_steps)
@@ -479,10 +479,11 @@ class GPT2ClassificationHeadModel(nn.Module):
     def forward(self, input_ids, attention_mask=None,
                 position_ids=None, token_type_ids=None,
                 labels=None, past=None):
-        hidden_states, presents = self.transformer(
+        hidden_states, _ = self.transformer(
             input_ids, position_ids, token_type_ids, past)
-        avg_pool = torch.mean(hidden_states, 1)
-        max_pool, _ = torch.max(hidden_states, 1)
+        last_hidden = hidden_states[-1]
+        avg_pool = torch.mean(last_hidden, 1)
+        max_pool, _ = torch.max(last_hidden, 1)
         h_conc = torch.cat((avg_pool, max_pool), 1)
         logits = self.linear(self.dropout(h_conc))
         return logits
