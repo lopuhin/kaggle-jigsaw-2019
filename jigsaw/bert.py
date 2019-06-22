@@ -89,7 +89,7 @@ def main():
             args.model, num_labels=num_labels)
     else:
         model = GPT2ClassificationHeadModel(args.model, num_labels=num_labels)
-        model.set_num_special_tokens(1)
+        model.transformer.set_num_special_tokens(1)
     model = model.to(device)
 
     model_path = run_root / 'model.pt'
