@@ -8,6 +8,7 @@ import json
 from functools import partial
 import shutil
 from pathlib import Path
+import os
 
 from apex import amp
 try:
@@ -27,8 +28,13 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler
 import tqdm
 
-from .metrics import compute_bias_metrics_for_model, IDENTITY_COLUMNS
-from .utils import DATA_ROOT, ON_KAGGLE
+if 'KAGGLE_WORKING_DIR' in os.environ:
+    ON_KAGGLE = True
+    DATA_ROOT = Path(
+        '../input/jigsaw-unintended-bias-in-toxicity-classification')
+else:
+    from .metrics import compute_bias_metrics_for_model, IDENTITY_COLUMNS
+    from .utils import DATA_ROOT, ON_KAGGLE
 
 
 device = torch.device('cuda')
@@ -77,7 +83,7 @@ def main():
     if args.export:
         if ((use_bert and 'bert' not in args.export) or
                 (use_gpt2 and 'gpt2' not in args.export)):
-            parser.error('Can\'t determine model kind from the --export option')
+            parser.error("Can't determine model kind from the --export option")
 
     print('Loading tokenizer...')
     if use_bert:
@@ -117,7 +123,8 @@ def main():
     model = model.to(device)
 
     if args.submission:
-        model.load_state_dict(torch.load(best_model_path))
+        if not Path(args.model).exists():
+            model.load_state_dict(torch.load(best_model_path))
         make_submission(model=model, tokenizer=tokenizer,
                         run_root=run_root, max_seq_length=args.test_seq_length,
                         batch_size=args.batch_size,
@@ -231,7 +238,8 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid,
     valid_preds, losses = [], []
     model.eval()
     for i, (x_batch, y_batch) in enumerate(
-            tqdm.tqdm(valid_loader, desc='validation', leave=False)):
+            tqdm.tqdm(valid_loader, desc='validation', leave=False,
+                      disable=ON_KAGGLE)):
         x_batch = x_batch.to(device)
         y_batch = y_batch.to(device)
         with torch.no_grad():
@@ -357,6 +365,7 @@ def tokenize_lines(texts, max_seq_length, tokenizer, use_bert: bool, pad_idx):
         use_bert=use_bert, pad_idx=pad_idx)
     with multiprocessing.Pool(processes=4 if ON_KAGGLE else 16) as pool:
         for tokens in tqdm.tqdm(pool.imap(worker, texts, chunksize=100),
+                                disable=ON_KAGGLE,
                                 total=len(texts), desc='tokenizing'):
             all_tokens.append(tokens)
     n_max_len = sum(t[-1] != 0 for t in all_tokens)
@@ -425,7 +434,8 @@ def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
     test_preds = []
     model.eval()
     for i, (x_batch, ) in enumerate(
-            tqdm.tqdm(test_loader, desc='submission', leave=False)):
+            tqdm.tqdm(test_loader, desc='submission', leave=False,
+                      disable=ON_KAGGLE)):
         x_batch = x_batch.to(device)
         with torch.no_grad():
             y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
