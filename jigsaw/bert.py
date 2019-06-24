@@ -10,12 +10,15 @@ import shutil
 from pathlib import Path
 
 from apex import amp
-import json_log_plots
+try:
+    import json_log_plots
+except ImportError:
+    pass
 import numpy as np
 import pandas as pd
 from pytorch_pretrained_bert import (
     BertTokenizer, BertForSequenceClassification, BertAdam,
-    GPT2Tokenizer, OpenAIAdam, GPT2Model)
+    GPT2Tokenizer, OpenAIAdam, GPT2Model, WEIGHTS_NAME, CONFIG_NAME)
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -52,14 +55,15 @@ def main():
     arg('--fold', type=int, default=0)
     arg('--bucket', type=int, default=1)
     arg('--load-weights', help='load weights for training')
+    arg('--export', help='export everything for inference')
     args = parser.parse_args()
 
     run_root = Path(args.run_root)
-    if args.clean and run_root.exists():
-        if input(f'Clean "{run_root.absolute()}"? ') == 'y':
-            shutil.rmtree(run_root)
-    do_train = not (args.submission or args.validation)
+    do_train = not (args.submission or args.validation or args.export)
     if do_train:
+        if args.clean and run_root.exists():
+            if input(f'Clean "{run_root.absolute()}"? ') == 'y':
+                shutil.rmtree(run_root)
         if run_root.exists():
             parser.error(f'{run_root} exists')
         run_root.mkdir(exist_ok=True, parents=True)
@@ -68,19 +72,24 @@ def main():
         (run_root / 'params.json').write_text(params_str)
         shutil.copy(__file__, run_root)
 
-    use_bert = args.model.startswith('bert')
-    use_gpt2 = args.model.startswith('gpt2')
+    use_bert = 'bert' in args.model
+    use_gpt2 = 'gpt2' in args.model
+    if args.export:
+        if ((use_bert and 'bert' not in args.export) or
+                (use_gpt2 and 'gpt2' not in args.export)):
+            parser.error('Can\'t determine model kind from the --export option')
 
     print('Loading tokenizer...')
     if use_bert:
-        tokenizer = BertTokenizer.from_pretrained(args.model)
+        tokenizer = BertTokenizer.from_pretrained(
+            args.model, do_lower_case='uncased' not in args.model)
         pad_idx = 0
     elif use_gpt2:
         tokenizer = GPT2Tokenizer.from_pretrained(args.model)
         tokenizer.set_special_tokens([GPT2_PAD])
         pad_idx, = tokenizer.convert_tokens_to_ids([GPT2_PAD])
     else:
-        raise ValueError
+        raise ValueError(f'Unexpected model {args.model}')
 
     print('Loading model...')
     num_labels = 7
@@ -90,12 +99,22 @@ def main():
     else:
         model = GPT2ClassificationHeadModel(args.model, num_labels=num_labels)
         model.transformer.set_num_special_tokens(1)
-    model = model.to(device)
 
     model_path = run_root / 'model.pt'
     optimizer_path = run_root / 'optimizer.pt'
     best_model_path = run_root / 'model-best.pt'
     valid_predictions_path = run_root / 'valid-predictions.csv'
+
+    if args.export:
+        model.load_state_dict(torch.load(best_model_path))
+        export_path = Path(args.export)
+        export_path.mkdir(exist_ok=True, parents=True)
+        torch.save(model.state_dict(), export_path / WEIGHTS_NAME)
+        model.config.to_json_file(export_path / CONFIG_NAME)
+        tokenizer.save_vocabulary(export_path)
+        return
+
+    model = model.to(device)
 
     if args.submission:
         model.load_state_dict(torch.load(best_model_path))
@@ -475,6 +494,10 @@ class GPT2ClassificationHeadModel(nn.Module):
         self.linear = nn.Linear(self.transformer.config.n_embd * 2, num_labels)
         nn.init.normal_(self.linear.weight, std=0.02)
         nn.init.normal_(self.linear.bias, 0)
+
+    @property
+    def config(self):
+        return self.transformer.confg
 
     def forward(self, input_ids, attention_mask=None,
                 position_ids=None, token_type_ids=None,
