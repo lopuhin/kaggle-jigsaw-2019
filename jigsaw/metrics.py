@@ -129,14 +129,16 @@ def main():
     parser.add_argument('valid_predictions', nargs='+')
     parser.add_argument('--column', default='prediction')
     parser.add_argument('--weights', help='comma separated')
+    parser.add_argument('--only-blend', action='store_true')
     args = parser.parse_args()
 
     dfs = []
     for path in args.valid_predictions:
         df = pd.read_csv(path)
         dfs.append(df)
-        metrics = compute_bias_metrics_for_model(df, args.column)
-        print(f'{metrics["auc"]:.4f} for {path}')
+        if not args.only_blend:
+            metrics = compute_bias_metrics_for_model(df, args.column)
+            print(f'{metrics["auc"]:.4f} for {path}')
 
     if len(dfs) > 1:
         blend_df = blend(dfs, args.weights, args.column)
