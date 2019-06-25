@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 from typing import List, Union
 
 import numpy as np
@@ -29,12 +30,19 @@ def main():
 
     if len(args.submissions) < 2:
         parser.error('At least two submissions required for blend')
+    if args.weights:
+        all_weights = list(map(float, args.weights.split(',')))
+    else:
+        all_weights = [1] * len(args.submissions)
     dfs = []
-    for path in args.submissions:
-        df = pd.read_csv(path)
-        dfs.append(df)
+    weights = []
+    for path, w in zip(args.submissions, all_weights):
+        if Path(path).exists():
+            df = pd.read_csv(path)
+            dfs.append(df)
+            weights.append(w)
 
-    blend_df = blend(dfs, args.weights, 'prediction')
+    blend_df = blend(dfs, weights, 'prediction')
     blend_df.to_csv(args.out, index=None)
     print(f'Saved blend to {args.out}')
 
