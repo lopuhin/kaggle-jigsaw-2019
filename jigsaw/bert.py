@@ -201,6 +201,7 @@ def main():
                 lr=args.lr,
                 batch_size=args.batch_size,
                 accumulation_steps=args.accumulation_steps,
+                pad_idx=pad_idx,
                 ):
             if step == 0:
                 continue  # step 0 allows saving on Ctrl+C from the start
@@ -261,7 +262,7 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid,
 
 def train(
         *, model, criterion, x_train, y_train, epochs, yield_steps, bucket, lr,
-        batch_size: int, accumulation_steps: int
+        batch_size: int, accumulation_steps: int, pad_idx: int,
         ):
     train_dataset = TensorDataset(
         torch.tensor(x_train, dtype=torch.long),
@@ -303,7 +304,8 @@ def train(
 
     if bucket:
         sampler = RandomSampler(train_dataset)
-        batch_sampler = BucketBatchSampler(sampler, batch_size, drop_last=False)
+        batch_sampler = BucketBatchSampler(
+            sampler, batch_size, drop_last=False, pad_idx=pad_idx)
         train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
     else:
         train_loader = DataLoader(
@@ -329,7 +331,7 @@ def train(
         for x_batch, y_batch in pbar:
             step += 1
             if bucket:
-                x_batch, y_batch = trim_tensors([x_batch, y_batch])
+                x_batch, y_batch = trim_tensors([x_batch, y_batch], pad_idx)
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
             try:
@@ -452,10 +454,16 @@ def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
 
 
 class BucketBatchSampler(BatchSampler):
+    def __init__(self, *args, pad_idx=None, **kwargs):
+        assert pad_idx is not None
+        super().__init__(*args, **kwargs)
+        self.pad_idx = pad_idx
+
     def __iter__(self):
         k = 8
         buckets = defaultdict(list)
-        lengths = (self.sampler.data_source.tensors[0] == 0).sum(dim=1).numpy()
+        lengths = (self.sampler.data_source.tensors[0] != self.pad_idx
+                   ).sum(dim=1).numpy()
         for idx in self.sampler:
             buckets[binned_length(lengths[idx], k)].append(idx)
 
@@ -492,8 +500,8 @@ def binned_length(length: int, k=8) -> int:
     return binned
 
 
-def trim_tensors(tsrs):
-    max_len = binned_length(int(torch.max(torch.sum(tsrs[0] != 0, 1))))
+def trim_tensors(tsrs, pad_idx):
+    max_len = binned_length(int(torch.max(torch.sum(tsrs[0] != pad_idx, 1))))
     tsrs = [tsr[:, :max_len] for tsr in tsrs]
     return tsrs
 
