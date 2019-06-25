@@ -41,6 +41,8 @@ def main():
             df = pd.read_csv(path)
             dfs.append(df)
             weights.append(w)
+        else:
+            print(f'missing file {path}')
 
     blend_df = blend(dfs, weights, 'prediction')
     blend_df.to_csv(args.out, index=None)
