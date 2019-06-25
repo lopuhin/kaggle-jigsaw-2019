@@ -1,9 +1,11 @@
 import argparse
-from typing import Dict, List, Union
+from typing import Dict
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
+
+from .blend import blend
 
 
 SUBGROUP_AUC = 'subgroup_auc'
@@ -107,21 +109,6 @@ def _calculate_overall_auc(df, pred_col):
 def _power_mean(series, p):
     total = sum(np.power(series, p))
     return np.power(total / len(series), 1 / p)
-
-
-def blend(dfs, weights: Union[str, List[float]], column: str):
-    blend_df = dfs[0].copy()
-    if weights:
-        if isinstance(weights, str):
-            weights = list(map(float, weights.split(',')))
-    else:
-        weights = [1] * len(dfs)
-    assert len(weights) == len(dfs)
-    weights = [w / sum(weights) for w in weights]
-    blend_df[column] = np.mean(
-        [w * df[column].values for w, df in zip(weights, dfs)],
-        axis=0)
-    return blend_df
 
 
 def main():

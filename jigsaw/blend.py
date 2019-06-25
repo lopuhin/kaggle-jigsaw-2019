@@ -1,9 +1,23 @@
 import argparse
+from typing import List, Union
 
 import numpy as np
 import pandas as pd
 
-from .metrics import blend
+
+def blend(dfs, weights: Union[str, List[float]], column: str):
+    blend_df = dfs[0].copy()
+    if weights:
+        if isinstance(weights, str):
+            weights = list(map(float, weights.split(',')))
+    else:
+        weights = [1] * len(dfs)
+    assert len(weights) == len(dfs)
+    weights = [w / sum(weights) for w in weights]
+    blend_df[column] = np.mean(
+        [w * df[column].values for w, df in zip(weights, dfs)],
+        axis=0)
+    return blend_df
 
 
 def main():
