@@ -47,6 +47,7 @@ def main():
     arg('run_root')
     arg('--train-size', type=int)
     arg('--valid-size', type=int)
+    arg('--test-size', type=int)
     arg('--model', default='bert-base-uncased')
     arg('--train-seq-length', type=int, default=224)
     arg('--test-seq-length', type=int, default=296)
@@ -130,7 +131,9 @@ def main():
                         run_root=run_root, max_seq_length=args.test_seq_length,
                         batch_size=args.batch_size,
                         pad_idx=pad_idx,
-                        use_bert=use_bert)
+                        use_bert=use_bert,
+                        bucket=args.bucket,
+                        test_size=args.test_size)
         return
 
     train_pkl_path = DATA_ROOT / 'train.pkl'
@@ -150,6 +153,9 @@ def main():
     x_valid = tokenize_lines(
         df_valid.pop('comment_text'), args.test_seq_length, tokenizer,
         use_bert=use_bert, pad_idx=pad_idx)
+    if args.bucket:
+        indices, x_valid = sorted_by_length(x_valid, pad_idx)
+        df_valid = df_valid.iloc[indices]
     y_valid, _ = get_target(df_valid)
     y_train, loss_weight = get_target(df_train)
     print(f'X_valid.shape={x_valid.shape} y_valid.shape={y_valid.shape}')
@@ -160,7 +166,8 @@ def main():
         return validation(
             model=model, criterion=criterion,
             x_valid=x_valid, y_valid=y_valid, df_valid=df_valid,
-            batch_size=args.batch_size)
+            batch_size=args.batch_size,
+            pad_idx=pad_idx, bucket=args.bucket)
 
     if args.validation:
         model.load_state_dict(torch.load(best_model_path))
@@ -230,7 +237,7 @@ def get_loss(pred, targets, loss_weight):
 
 
 def validation(*, model, criterion, x_valid, y_valid, df_valid,
-               batch_size: int):
+               batch_size: int, bucket: bool, pad_idx: int):
     valid_dataset = TensorDataset(
         torch.tensor(x_valid, dtype=torch.long),
         torch.tensor(y_valid, dtype=torch.float),
@@ -243,6 +250,8 @@ def validation(*, model, criterion, x_valid, y_valid, df_valid,
     for i, (x_batch, y_batch) in enumerate(
             tqdm.tqdm(valid_loader, desc='validation', leave=False,
                       disable=ON_KAGGLE)):
+        if bucket:
+            x_batch, y_batch = trim_tensors([x_batch, y_batch], pad_idx)
         x_batch = x_batch.to(device)
         y_batch = y_batch.to(device)
         with torch.no_grad():
@@ -427,11 +436,17 @@ def get_target(df_train):
 
 
 def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
-                    batch_size: int, pad_idx, use_bert):
+                    batch_size: int, pad_idx, use_bert, bucket, test_size):
     df = pd.read_csv(DATA_ROOT / 'test.csv')
+    if test_size and len(df) > test_size:
+        df = df.sample(n=test_size, random_state=42)
     df = preprocess_df(df)
     x_test = tokenize_lines(df.pop('comment_text'), max_seq_length, tokenizer,
                             pad_idx=pad_idx, use_bert=use_bert)
+    if bucket:
+        indices, x_test = sorted_by_length(x_test, pad_idx)
+        df = df.iloc[indices]
+
     test_dataset = TensorDataset(torch.tensor(x_test, dtype=torch.long))
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
@@ -440,6 +455,8 @@ def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
     for i, (x_batch, ) in enumerate(
             tqdm.tqdm(test_loader, desc='submission', leave=False,
                       disable=ON_KAGGLE)):
+        if bucket:
+            x_batch, = trim_tensors([x_batch], pad_idx)
         x_batch = x_batch.to(device)
         with torch.no_grad():
             y_pred = model(x_batch, attention_mask=x_batch > 0, labels=None)
@@ -449,6 +466,7 @@ def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
     df['prediction'] = torch.sigmoid(torch.tensor(test_preds)).numpy()
     root = Path('.') if ON_KAGGLE else run_root
     path = root / 'submission.csv'
+    df.sort_values('id', inplace=True)
     df.to_csv(path, index=None)
     print(f'Saved submission to {path}')
 
@@ -504,6 +522,15 @@ def trim_tensors(tsrs, pad_idx):
     max_len = binned_length(int(torch.max(torch.sum(tsrs[0] != pad_idx, 1))))
     tsrs = [tsr[:, :max_len] for tsr in tsrs]
     return tsrs
+
+
+def sorted_by_length(tokens, pad_idx):
+    assert len(tokens.shape) == 2
+    lengths = np.sum(tokens != pad_idx, axis=1)
+    indexed = sorted(enumerate(tokens), key=lambda x: lengths[x[0]])
+    indices = np.array([i for i, _ in indexed])
+    tokens = np.array([t for _, t in indexed])
+    return indices, tokens
 
 
 class GPT2ClassificationHeadModel(nn.Module):
