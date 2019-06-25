@@ -88,7 +88,7 @@ def main():
     print('Loading tokenizer...')
     if use_bert:
         tokenizer = BertTokenizer.from_pretrained(
-            args.model, do_lower_case='uncased' not in args.model)
+            args.model, do_lower_case='uncased' in args.model)
         pad_idx = 0
     elif use_gpt2:
         tokenizer = GPT2Tokenizer.from_pretrained(args.model)
