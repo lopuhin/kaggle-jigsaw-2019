@@ -125,6 +125,7 @@ def main():
     if args.submission:
         if not Path(args.model).exists():
             model.load_state_dict(torch.load(best_model_path))
+        model = amp.initialize(model, opt_level='O1', verbosity=0)
         make_submission(model=model, tokenizer=tokenizer,
                         run_root=run_root, max_seq_length=args.test_seq_length,
                         batch_size=args.batch_size,
@@ -163,6 +164,7 @@ def main():
 
     if args.validation:
         model.load_state_dict(torch.load(best_model_path))
+        model = amp.initialize(model, opt_level='O1', verbosity=0)
         metrics, valid_predictions = _run_validation()
         for k, v in metrics.items():
             if isinstance(v, float):
@@ -507,7 +509,7 @@ class GPT2ClassificationHeadModel(nn.Module):
 
     @property
     def config(self):
-        return self.transformer.confg
+        return self.transformer.config
 
     def forward(self, input_ids, attention_mask=None,
                 position_ids=None, token_type_ids=None,
