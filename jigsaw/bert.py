@@ -10,7 +10,10 @@ import shutil
 from pathlib import Path
 import os
 
-from apex import amp
+try:
+    from apex import amp
+except ImportError:
+    amp = None
 try:
     import json_log_plots
 except ImportError:
@@ -78,6 +81,8 @@ def main():
         print(params_str)
         (run_root / 'params.json').write_text(params_str)
         shutil.copy(__file__, run_root)
+    else:
+        run_root.mkdir(exist_ok=True, parents=True)
 
     use_bert = 'bert' in args.model
     use_gpt2 = 'gpt2' in args.model
@@ -126,7 +131,8 @@ def main():
     if args.submission:
         if not Path(args.model).exists():
             model.load_state_dict(torch.load(best_model_path))
-        model = amp.initialize(model, opt_level='O1', verbosity=0)
+        if amp is not None:
+            model = amp.initialize(model, opt_level='O1', verbosity=0)
         make_submission(model=model, tokenizer=tokenizer,
                         run_root=run_root, max_seq_length=args.test_seq_length,
                         batch_size=args.batch_size,
@@ -171,7 +177,8 @@ def main():
 
     if args.validation:
         model.load_state_dict(torch.load(best_model_path))
-        model = amp.initialize(model, opt_level='O1', verbosity=0)
+        if amp is not None:
+            model = amp.initialize(model, opt_level='O1', verbosity=0)
         metrics, valid_predictions = _run_validation()
         for k, v in metrics.items():
             if isinstance(v, float):
@@ -464,8 +471,7 @@ def make_submission(*, model, tokenizer, run_root: Path, max_seq_length: int,
     model.train()
 
     df['prediction'] = torch.sigmoid(torch.tensor(test_preds)).numpy()
-    root = Path('.') if ON_KAGGLE else run_root
-    path = root / 'submission.csv'
+    path = run_root / 'submission.csv'
     df.sort_values('id', inplace=True)
     df.to_csv(path, index=None)
     print(f'Saved submission to {path}')
