@@ -104,6 +104,7 @@ def main():
         raise ValueError(f'Unexpected model {args.model}')
 
     print('Loading model...')
+    model_is_path = Path(args.model).exists()
     num_labels = 7
     if use_bert:
         model = BertForSequenceClassification.from_pretrained(
@@ -111,6 +112,10 @@ def main():
     else:
         model = GPT2ClassificationHeadModel(args.model, num_labels=num_labels)
         model.transformer.set_num_special_tokens(1)
+        if model_is_path:
+            # to also load linear layer weights
+            model.load_state_dict(
+                torch.load(Path(args.model) / 'pytorch_model.bin'))
 
     model_path = run_root / 'model.pt'
     optimizer_path = run_root / 'optimizer.pt'
@@ -129,7 +134,7 @@ def main():
     model = model.to(device)
 
     if args.submission:
-        if not Path(args.model).exists():
+        if not model_is_path:
             model.load_state_dict(torch.load(best_model_path))
         if amp is not None:
             model = amp.initialize(model, opt_level='O1', verbosity=0)
@@ -161,6 +166,7 @@ def main():
         use_bert=use_bert, pad_idx=pad_idx)
     if args.bucket:
         indices, x_valid = sorted_by_length(x_valid, pad_idx)
+        # TODO recover original order before saving
         df_valid = df_valid.iloc[indices]
     y_valid, _ = get_target(df_valid)
     y_train, loss_weight = get_target(df_train)
@@ -176,7 +182,8 @@ def main():
             pad_idx=pad_idx, bucket=args.bucket)
 
     if args.validation:
-        model.load_state_dict(torch.load(best_model_path))
+        if not model_is_path:
+            model.load_state_dict(torch.load(best_model_path))
         if amp is not None:
             model = amp.initialize(model, opt_level='O1', verbosity=0)
         metrics, valid_predictions = _run_validation()
